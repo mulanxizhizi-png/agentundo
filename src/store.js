@@ -47,7 +47,8 @@ class Store {
 
   git(args, { input, index = this.index, allowFail = false, maxBuffer = 512 * MB } = {}) {
     const r = spawnSync('git', ['-c', 'core.quotePath=false', '-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', ...args], {
-      cwd: this.root, input, maxBuffer, timeout: 120000,
+      // cwd must exist or spawn fails with ENOENT (e.g. project dir deleted); git uses GIT_DIR/GIT_WORK_TREE anyway.
+      cwd: fs.existsSync(this.root) ? this.root : (fs.existsSync(this.dir) ? this.dir : require('os').tmpdir()), input, maxBuffer, timeout: 120000,
       env: { ...process.env, GIT_DIR: this.gitDir, GIT_WORK_TREE: this.root, GIT_INDEX_FILE: index,
         GIT_AUTHOR_NAME: 'agentundo', GIT_AUTHOR_EMAIL: 'agentundo@localhost', GIT_COMMITTER_NAME: 'agentundo', GIT_COMMITTER_EMAIL: 'agentundo@localhost',
         GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' },

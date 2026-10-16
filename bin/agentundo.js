@@ -242,6 +242,8 @@ async function uninstall() {
   const reg = I.readRegistry();
   const here = new Store(projectRoot()).root;
   const targets = global ? [...new Set([...reg, ...(reg.includes(here) ? [] : [])])] : [here];
+  const missing = targets.filter((p) => !fs.existsSync(p));
+  for (const p of missing) console.error(c('33', `warning: registered project ${p} no longer exists; skipping its project files (hooks/exclude), cleaning up agentundo's own data only`));
   if (purge) {
     const stores = targets.map((p) => new Store(p)).filter((s) => s.exists());
     if (stores.length) {
@@ -254,10 +256,11 @@ async function uninstall() {
   let remaining = reg;
   for (const root of targets) {
     const res = { root, deleted: [], kept: [] };
-    for (const scope of ['local', 'user']) {
+    if (missing.includes(root)) res.kept.push('project directory is gone (skipped project files)');
+    else for (const scope of ['local', 'user']) {
       try { const f = I.uninstallHook({ agent: 'claude', root, scope }); if (f) res.deleted.push(`Claude hooks in ${f}`); } catch (e) { res.kept.push(`${e.message}`); }
     }
-    try { if (I.removeExcludes(root)) res.deleted.push('.git/info/exclude block'); } catch {}
+    if (!missing.includes(root)) try { if (I.removeExcludes(root)) res.deleted.push('.git/info/exclude block'); } catch {}
     const s = new Store(root);
     if (s.exists() || fs.existsSync(s.dir)) {
       if (purge) { fs.rmSync(s.dir, { recursive: true, force: true }); res.deleted.push(`snapshots (${s.dir})`); }
@@ -278,6 +281,7 @@ async function uninstall() {
     for (const k of r.kept) console.log(`  kept:    ${k}`);
     if (!r.deleted.length && !r.kept.length) console.log('  nothing to remove');
   }
+  if (missing.length) console.log(`done, with ${missing.length} missing project(s) skipped (see warnings above)`);
 }
 
 main().catch((e) => die(e.message));

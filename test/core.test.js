@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const fs = require('fs'); const path = require('path');
+const fs = require('fs'); const path = require('path'); const os = require('os');
 const { spawn, execFileSync } = require('child_process');
 const { BIN, freshEnv, tmpProject, run, bash, prompt, fingerprint, gitOut } = require('./helpers');
 
@@ -377,4 +377,24 @@ test('deleted shadow repo: hook recreates it, warns that history was lost, takes
   fs.writeFileSync(path.join(d, 'a.txt'), '3');
   assert.strictEqual(run(env, d, ['restore', '1', '--yes']).code, 0);
   assert.strictEqual(fs.readFileSync(path.join(d, 'a.txt'), 'utf8'), '2');
+});
+
+test('uninstall --global --purge --yes survives a deleted registered project (was: spawnSync git ENOENT)', () => {
+  const env = freshEnv();
+  const gone = tmpProject({ 'a.txt': '1' }); const keep = tmpProject({ 'b.txt': '2' });
+  for (const d of [gone, keep]) { assert.strictEqual(run(env, d, ['init', '--agent', 'codex']).code, 0); run(env, d, ['init', '--agent', 'claude']); run(env, d, ['snap']); }
+  fs.rmSync(gone, { recursive: true, force: true });
+  const st = run(env, keep, ['status']); assert.strictEqual(st.code, 0, st.out);
+  const l = run(env, keep, ['list']); assert.strictEqual(l.code, 0, l.out);
+  const u = run(env, os.tmpdir(), ['uninstall', '--global', '--purge', '--yes']);
+  assert.strictEqual(u.code, 0, u.out);
+  assert.doesNotMatch(u.out, /ENOENT/);
+  assert.match(u.out, /warning: registered project .* no longer exists/);
+  assert.match(u.out, /missing project\(s\) skipped/);
+  assert.match(u.out, /deleted: Codex hooks/);
+  const hj = path.join(env.CODEX_HOME, 'hooks.json');
+  assert.ok(!fs.existsSync(hj) || !/agentundo/.test(fs.readFileSync(hj, 'utf8')));
+  assert.ok(!fs.existsSync(path.join(keep, '.claude', 'settings.local.json')) || !/agentundo/.test(fs.readFileSync(path.join(keep, '.claude', 'settings.local.json'), 'utf8')));
+  assert.ok(!fs.existsSync(path.join(env.AGENTUNDO_HOME, 'stores')) || fs.readdirSync(path.join(env.AGENTUNDO_HOME, 'stores')).length === 0);
+  assert.ok(!fs.existsSync(path.join(env.AGENTUNDO_HOME, 'projects.json')) || JSON.parse(fs.readFileSync(path.join(env.AGENTUNDO_HOME, 'projects.json'), 'utf8')).projects.length === 0);
 });
