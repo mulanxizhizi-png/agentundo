@@ -3,6 +3,7 @@
 Website and unedited demo video: https://agentundo.netlify.app
 
 **An undo button for coding agents.** agentundo snapshots your project right before every command Codex or Claude Code runs (`rm`, `mv`, scripts, file edits) and at the start of every turn. When the agent deletes or breaks something, one command takes you back:
+
 ```
 $ agentundo list
 ID    TURN    WHEN     AGENT   FILES  SNAPSHOT TAKEN
