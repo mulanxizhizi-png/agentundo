@@ -39,7 +39,8 @@ This installs hooks for both agents (`--agent codex` or `--agent claude` for one
 agentundo list [--limit 20 | --all]          snapshots: id, turn, the command it preceded, ⚠ for dangerous ones
 agentundo diff <id> [--patch] [-- <paths>]   what changed between that snapshot and now
 agentundo restore <id> [--dry-run] [--yes] [-- <paths>]
-agentundo snap [note]                        take a snapshot by hand
+agentundo snap [note] [--json]               take a snapshot by hand
+agentundo receipt --status <s> --json        used by agentreceipt (see below)
 agentundo status                             storage, caps, hooks, last failure
 agentundo prune --keep <n>
 agentundo uninstall [--global] [--purge] [--yes]
@@ -87,6 +88,22 @@ agentundo uninstall --purge    # also delete the snapshots (asks first; --yes wi
 ```
 
 Uninstall only removes what agentundo added, and prints what it deleted and kept for each project. The Codex hook and the runtime are removed once no project uses them.
+
+## With agentreceipt
+
+If [agentreceipt](https://github.com/mulanxizhizi-png/agentreceipt) (v0.1.3+) is installed too, each receipt records the snapshot it verified. `agentundo list` then shows `✓ tests passed` / `✗ tests failed` next to those snapshots, plus the last snapshot where tests passed. Red receipts include the command to go back to that snapshot.
+
+Machine interface (stable, `schemaVersion: 1`, always exits 0 with one JSON line):
+
+```
+agentundo receipt --status green|red|blocked [--receipt <name>] --json
+  -> {"schemaVersion":1,"ok":true,"snapshotId":9,"created":true,"lastGreenSnapshotId":4,"restoreCommand":"~/.agentundo/bin/agentundo restore 4","warnings":[]}
+  -> {"schemaVersion":1,"ok":false,"reason":"not-initialized"}   (agentundo not set up in this project)
+agentundo snap --json [--label <text>]
+agentundo list --json
+```
+
+When storage is over the cap, the newest green snapshot is never pruned. agentreceipt's own `.agentreceipt/receipts/`, `state/`, and `logs/` are not snapshotted, so a restore never deletes newer receipts.
 
 ## Works well with
 

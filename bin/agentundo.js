@@ -15,7 +15,7 @@ const pathsArg = dd >= 0 ? argv.slice(dd + 1) : [];
 const cmd = args[0];
 const flag = (n) => args.includes(n);
 const opt = (n, d) => { const i = args.indexOf(n); return i >= 0 && args[i + 1] ? args[i + 1] : d; };
-const positional = args.slice(1).filter((a, i, arr) => !a.startsWith('--') && !(i > 0 && ['--agent', '--limit', '--keep', '--claude-scope', '--only'].includes(arr[i - 1])));
+const positional = args.slice(1).filter((a, i, arr) => !a.startsWith('--') && !(i > 0 && ['--agent', '--limit', '--keep', '--claude-scope', '--only', '--label', '--status', '--receipt'].includes(arr[i - 1])));
 const tty = process.stdout.isTTY && !process.env.NO_COLOR;
 const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s);
 const die = (msg, code = 1) => { console.error(c('31', `agentundo: ${msg}`)); process.exit(code); };
@@ -49,7 +49,7 @@ function journalNotice(s) {
     try { const j = JSON.parse(fs.readFileSync(s.journal, 'utf8')); console.log(c('33', `! A restore of #${j.target} was interrupted. Re-run \`agentundo restore ${j.target}\` to finish it, or \`agentundo restore ${j.pre}\` to go back to how things were before it.`)); } catch {}
   }
 }
-const label = (m) => (m.event === 'turn' ? 'turn start' : m.event === 'restore' ? (m.note || 'before restore') : m.event === 'manual' ? (m.note || 'manual snapshot') : `before ${m.command || m.tool}`);
+const label = (m) => (m.event === 'turn' ? 'turn start' : m.event === 'restore' ? (m.note || 'before restore') : m.event === 'manual' ? (m.note || 'manual snapshot') : m.event === 'receipt' ? (m.note || 'agentreceipt verification') : `before ${m.command || m.tool}`);
 const ago = (ts) => { const s = (Date.now() - Date.parse(ts)) / 1000; return s < 60 ? `${Math.round(s)}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : s < 86400 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`; };
 
 async function main() {
@@ -61,6 +61,7 @@ async function main() {
     case 'restore': return doRestore();
     case 'status': return status();
     case 'snap': case 'snapshot': return snap();
+    case 'receipt': return receipt();
     case 'prune': return prune();
     case 'uninstall': return uninstall();
     case '-v': case '--version': case 'version': return console.log(I.VERSION);
@@ -112,7 +113,8 @@ function init() {
 function list() {
   const s = storeOrDie();
   journalNotice(s);
-  const all = s.meta();
+  const all = s.metaWithMarks();
+  if (flag('--json')) { const g = s.lastGreen(); return console.log(JSON.stringify({ schemaVersion: 1, root: s.root, lastGreen: g ? g.id : null, snapshots: all.map(({ tree, commit, ...m }) => ({ ...m, label: label(m) })) })); }
   const lim = flag('--all') ? all.length : Number(opt('--limit', 20));
   const rows = all.slice(-lim);
   if (!rows.length) return console.log('no snapshots yet');
@@ -120,9 +122,11 @@ function list() {
   for (const m of rows) {
     const t = m.step ? `t${m.turn}.${m.step}` : `t${m.turn}`;
     const danger = m.dangerous ? c('31', ' ⚠ dangerous') : '';
-    console.log(`${String(m.id).padEnd(5)} ${t.padEnd(7)} ${ago(m.ts).padEnd(8)} ${String(m.agent || '-').padEnd(7)} ${String(m.changed == null ? '-' : m.changed).padEnd(5)}  ${m.dangerous ? c('1', label(m)) : label(m)}${danger}${m.skipped && m.skipped.length ? c('33', ` (${m.skipped.length} big file(s) not saved)`) : ''}`);
+    console.log(`${String(m.id).padEnd(5)} ${t.padEnd(7)} ${ago(m.ts).padEnd(8)} ${String(m.agent || '-').padEnd(7)} ${String(m.changed == null ? '-' : m.changed).padEnd(5)}  ${m.dangerous ? c('1', label(m)) : label(m)}${danger}${m.receipt ? (m.receipt.status === 'green' ? c('32', ' ✓ tests passed') : c('31', ` ✗ tests ${m.receipt.status === 'blocked' ? 'failed (agent sent back)' : 'failed'}`)) : ''}${m.skipped && m.skipped.length ? c('33', ` (${m.skipped.length} big file(s) not saved)`) : ''}`);
   }
   if (all.length > rows.length) console.log(c('2', `(${all.length - rows.length} older; --all to show)`));
+  const g = s.lastGreen();
+  if (g) console.log(c('32', `Last snapshot where tests passed (agentreceipt): #${g.id}  ->  agentundo restore ${g.id}`));
   console.log(c('2', 'FILES = files changed since the previous snapshot. Restore with: agentundo restore <id>'));
 }
 
@@ -161,10 +165,35 @@ async function doRestore() {
 }
 
 function snap() {
-  const s = new Store(projectRoot());
-  const r = s.snapshot({ event: 'manual', note: positional.join(' ') || 'manual snapshot' });
-  console.log(r.created ? `snapshot #${r.snap.id}` : `no changes since #${r.snap.id}`);
-  for (const w of r.warnings) console.log(c('33', w));
+  const json = flag('--json');
+  try {
+    const s = new Store(projectRoot());
+    const r = s.snapshot({ event: 'manual', note: opt('--label', positional.join(' ')) || 'manual snapshot' });
+    if (json) return console.log(JSON.stringify({ ok: true, id: r.snap.id, created: r.created, turn: r.snap.turn, warnings: r.warnings }));
+    console.log(r.created ? `snapshot #${r.snap.id}` : `no changes since #${r.snap.id}`);
+    for (const w of r.warnings) console.log(c('33', w));
+  } catch (e) { if (json) { console.log(JSON.stringify({ ok: false, error: e.message })); return; } throw e; }
+}
+
+// Machine interface for agentreceipt (stable; schemaVersion 1). Always exits 0 with one JSON line.
+//   agentundo receipt --status green|red|blocked [--receipt <file name>] --json
+// Snapshots the verified state (no new snapshot if nothing changed), records the receipt status on
+// it, and returns the newest green snapshot so a red receipt can offer "go back to when tests passed".
+function receipt() {
+  const out = (o) => console.log(JSON.stringify({ schemaVersion: 1, ...o }));
+  try {
+    const status = opt('--status');
+    if (!['green', 'red', 'blocked'].includes(status)) return out({ ok: false, error: '--status must be green, red or blocked' });
+    const root = I.findProject(process.cwd());
+    if (!root) return out({ ok: false, reason: 'not-initialized' });
+    const s = new Store(root);
+    const r = s.snapshot({ event: 'receipt', note: `agentreceipt: tests ${status === 'green' ? 'passed' : 'failed'}` });
+    s.mark(r.snap.id, { status, receipt: opt('--receipt') || null, ts: new Date().toISOString() });
+    const g = status === 'green' ? r.snap : s.lastGreen(r.snap.id);
+    const cli = path.join(homeDir(), 'bin', 'agentundo').replace(require('os').homedir(), '~');
+    out({ ok: true, snapshotId: r.snap.id, created: r.created, lastGreenSnapshotId: g ? g.id : null,
+      restoreCommand: status !== 'green' && g ? `${cli} restore ${g.id}` : null, warnings: r.warnings });
+  } catch (e) { out({ ok: false, error: e.message }); }
 }
 
 function status() {

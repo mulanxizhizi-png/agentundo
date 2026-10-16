@@ -11,7 +11,7 @@ const { isDangerous } = require('./danger');
 
 const MB = 1024 * 1024;
 const DEFAULTS = { maxFileMB: 50, maxTotalMB: 2048, keepMin: 20, includeEnv: false };
-const DEFAULT_EXCLUDES = ['node_modules/', '.venv/', 'venv/', '__pycache__/', 'dist/', 'build/', 'target/', '.next/', '.nuxt/', '.cache/', 'coverage/', '.agentundo-tmp-*/'];
+const DEFAULT_EXCLUDES = ['node_modules/', '.venv/', 'venv/', '__pycache__/', 'dist/', 'build/', 'target/', '.next/', '.nuxt/', '.cache/', 'coverage/', '.agentundo-tmp-*/', '.agentreceipt/receipts/', '.agentreceipt/state/', '.agentreceipt/logs/'];
 const ENV_EXCLUDES = ['.env', '.env.*', '!.env.example', '!.env.sample'];
 const DB_RE = /\.(sqlite3?|db)(-wal|-shm|-journal)?$/i;
 
@@ -98,6 +98,26 @@ class Store {
     for (const l of text.split('\n')) { if (!l.trim()) continue; try { out.push(JSON.parse(l)); } catch {} }
     return out;
   }
+  metaWithMarks() {
+    const marks = this.marks();
+    return this.meta().map((m) => (marks[m.id] ? { ...m, receipt: marks[m.id] } : m));
+  }
+  // Receipt marks (from agentreceipt): { "<id>": { status, receipt, ts } }, joined into meta() as m.receipt.
+  marks() { try { return JSON.parse(fs.readFileSync(path.join(this.dir, 'marks.json'), 'utf8')) || {}; } catch { return {}; } }
+  mark(id, info) {
+    const unlock = this.lock();
+    try {
+      const all = this.marks(); all[id] = info;
+      const live = new Set(this.meta().map((m) => String(m.id)));
+      for (const k of Object.keys(all)) if (!live.has(k)) delete all[k];
+      const f = path.join(this.dir, 'marks.json'); fs.writeFileSync(f + '.tmp', JSON.stringify(all)); fs.renameSync(f + '.tmp', f);
+    } finally { unlock(); }
+  }
+  // Newest snapshot with a green receipt, optionally strictly before snapshot id `beforeId`.
+  lastGreen(beforeId = Infinity) {
+    const marks = this.marks();
+    return this.meta().filter((m) => m.id < beforeId && marks[m.id] && marks[m.id].status === 'green').pop() || null;
+  }
   appendMeta(m) { fs.appendFileSync(this.metaFile, JSON.stringify(m) + '\n'); }
   rewriteMeta(list) { const tmp = this.metaFile + '.tmp'; fs.writeFileSync(tmp, list.map((m) => JSON.stringify(m) + '\n').join('')); fs.renameSync(tmp, this.metaFile); }
   state() { try { return JSON.parse(fs.readFileSync(this.stateFile, 'utf8')); } catch { return { nextId: 1, turn: 0, turns: {} }; } }
@@ -162,7 +182,7 @@ class Store {
       const all = this.meta();
       const last = all[all.length - 1];
       const s = this.state();
-      const turn = label.event === 'restore' || label.event === 'manual' ? (s.turn || 0) : this.turnFor(s, label.session, label.turnKey, label.event === 'turn');
+      const turn = ['restore', 'manual', 'receipt'].includes(label.event) ? (s.turn || 0) : this.turnFor(s, label.session, label.turnKey, label.event === 'turn');
       if (skipped.length) warnings.push(`agentundo: ${skipped.length} file(s) over ${this.cfg.maxFileMB}MB not snapshotted: ${skipped.slice(0, 3).map((x) => x.path).join(', ')}${skipped.length > 3 ? ', …' : ''}`);
       const command0 = label.command ? String(label.command) : '';
       // Unchanged tree: skip, except the first command of a new turn or a dangerous command, so
@@ -211,23 +231,25 @@ class Store {
     const all = this.meta();
     const removable = Math.max(0, all.length - this.cfg.keepMin);
     let removed = 0;
+    const dropped = new Set();
     if (removable > 0) {
       // first pass: gc can shrink loose objects a lot without deleting anything
       this.gc();
       size = this.sizeBytes();
       while (size > cap && removed < removable) {
         const batch = Math.max(1, Math.ceil((removable - removed) / 4));
-        const drop = all.slice(removed, removed + batch);
-        for (const m of drop) this.git(['update-ref', '-d', `refs/au/s/${m.id}`], { allowFail: true });
-        removed += drop.length;
+        const green = this.lastGreen();
+        const drop = all.slice(removed, removed + batch).filter((m) => !green || m.id !== green.id);
+        for (const m of drop) { this.git(['update-ref', '-d', `refs/au/s/${m.id}`], { allowFail: true }); dropped.add(m.id); }
+        removed += batch;
         this.gc();
         size = this.sizeBytes();
       }
-      if (removed) this.rewriteMeta(all.slice(removed));
+      if (dropped.size) this.rewriteMeta(all.filter((m) => !dropped.has(m.id)));
     }
     const mb = (b) => (b / MB).toFixed(1);
-    if (size > cap) return [`agentundo WARNING: snapshots use ${mb(size)}MB, over the ${this.cfg.maxTotalMB}MB cap even after keeping only the newest ${all.length - removed}. Still snapshotting; raise maxTotalMB or exclude big folders in .agentundo/config.json.`];
-    return [`agentundo: reached the ${this.cfg.maxTotalMB}MB cap; removed ${removed} oldest snapshot(s) (now ${mb(size)}MB).`];
+    if (size > cap) return [`agentundo WARNING: snapshots use ${mb(size)}MB, over the ${this.cfg.maxTotalMB}MB cap even after keeping only the newest ${all.length - dropped.size}. Still snapshotting; raise maxTotalMB or exclude big folders in .agentundo/config.json.`];
+    return [`agentundo: reached the ${this.cfg.maxTotalMB}MB cap; removed ${dropped.size} oldest snapshot(s) (now ${mb(size)}MB).`];
   }
   gc() {
     this.git(['reflog', 'expire', '--expire=now', '--all'], { allowFail: true });

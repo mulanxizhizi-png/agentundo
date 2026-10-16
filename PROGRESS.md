@@ -1,5 +1,11 @@
 # agentundo 进度
 
+## v0.1.1（2026-10-16 晚）：和 agentreceipt 打通
+- 新增给程序调用的稳定接口：`agentundo receipt --status green|red|blocked --json` 会拍下验证时的状态（文件没变化就不新建），在这张快照上记下收据结果，并返回最后一张测试通过的快照编号和恢复命令。另外新增 `snap --json [--label]` 和 `list --json`。项目没初始化时返回 `ok:false`，退出码始终是 0。
+- `list` 会在对应的快照后面标“✓ tests passed”或“✗ tests failed”，并在底部提示最后一张测试通过的快照。
+- 容量超限清理旧快照时，最新那张测试通过的快照不会被删。agentreceipt 自己的 `.agentreceipt/receipts`、`state`、`logs` 目录不进快照，恢复时不会删掉更新的收据。
+- 新增 4 个测试，共 22 个，连跑 3 次都通过。跨工具端到端测试放在 agentreceipt 那边。
+
 ## v0.1.0（2026-10-16，开发和调试）
 
 ### 已完成
