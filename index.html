@@ -1,0 +1,49 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<!-- This site is hosted on Netlify. Anyone can build and deploy a site
+     like this one for free: https://netlify.new/?utm_campaign=loops&utm_source=ai-legible&utm_medium=owned&utm_content=comment&utm_id=3d3cfb46-c217-44ae-bd29-e748fde65b93
+     Netlify hosting facts for this site: static/SSR served via Netlify Edge. --><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>agentundo: undo what your coding agent just did</title>
+<meta name="description" content="Free, open-source hook that snapshots your project before every coding-agent tool call, so you can restore it after a bad rm -rf or reset.">
+<style>
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#faf8f3;color:#1d1d1f}
+main{max-width:760px;margin:0 auto;padding:56px 24px}
+h1{font-size:40px;line-height:1.15;margin:0 0 16px}
+p.lead{font-size:19px;color:#444;line-height:1.5}
+pre{background:#1d1d1f;color:#f5f5f5;padding:16px 18px;border-radius:10px;font-size:15px;overflow:auto}
+.term{background:#fff;border:1px dashed #bbb;border-radius:6px;padding:20px 24px;font-family:ui-monospace,Menlo,monospace;font-size:14px;line-height:1.7;margin:32px 0;white-space:pre;overflow:auto}
+.bad{color:#c0392b;font-weight:600}.ok{color:#1e8449}
+h2{margin-top:44px}
+li{margin:8px 0;line-height:1.5}
+footer{margin-top:48px;font-size:14px;color:#777}a{color:#1d1d1f}
+.video{margin:24px 0;border-radius:8px;overflow:hidden;border:1px solid #e3e0d8;background:#fbf3e1}
+.video button{all:unset;display:block;position:relative;cursor:pointer;width:100%}
+.video img{width:100%;display:block}
+.play{position:absolute;left:50%;top:80%;width:84px;height:84px;margin:-42px 0 0 -42px;border-radius:50%;background:rgba(29,29,31,.85);box-shadow:0 4px 18px rgba(0,0,0,.25)}
+.play:after{content:"";position:absolute;left:33px;top:24px;border-style:solid;border-width:18px 0 18px 28px;border-color:transparent transparent transparent #fff}
+.video button:hover .play,.video button:focus-visible .play{background:#000}
+.cap{position:absolute;left:12px;bottom:12px;background:rgba(29,29,31,.85);color:#fff;font-size:14px;padding:6px 10px;border-radius:6px}
+</style></head><body><main>
+<h1>Your coding agent just ran <code>rm -rf</code>.<br>Undo it.</h1>
+<p class="lead">agentundo is a free, open-source hook for Claude Code and Codex CLI. Before every tool call it snapshots your project into a shadow git repo outside your project, so you can go back to any step with one command.</p>
+<pre>npx github:mulanxizhizi-png/agentundo#v0.1.2 init</pre>
+<div class="video" id="demo"><button type="button" aria-label="Play the unedited 27-second demo" onclick="var v=document.createElement('video');v.src='demo.mp4';v.controls=true;v.autoplay=true;v.playsInline=true;v.style.width='100%';v.style.display='block';this.parentNode.replaceChildren(v);v.currentTime=0;v.play();"><img src="poster.png" alt="Real recording: after Claude Code ran rm -rf src, agentundo list shows snapshot 2, before rm -rf src, marked dangerous"><span class="play"></span><span class="cap">Watch the unedited 27s demo</span></button></div>
+<div class="term">$ agentundo list
+ID  TURN  WHEN    AGENT   FILES  SNAPSHOT TAKEN
+1   t0    20s ago -       -      baseline (agentundo init)
+2   t1.1  7s ago  claude  0      before rm -rf src <span class="bad">⚠ dangerous</span>
+$ agentundo restore 2 --yes
+<span class="ok">Restored #2: wrote 2, removed 0.</span>
+Undo this restore: agentundo restore 3</div>
+<h2>How it works</h2><ul>
+<li><b>Snapshots before every tool call.</b> A pre-tool-use hook saves your files into a shadow git repo under <code>~/.agentundo</code>. Your own git history is never touched.</li>
+<li><b>Restore any step.</b> <code>agentundo list</code> shows each snapshot with the command it preceded. <code>agentundo restore &lt;id&gt;</code> puts files back, and every restore can itself be undone.</li>
+<li><b>Flags dangerous commands.</b> <code>rm -rf</code>, <code>git reset --hard</code>, <code>git clean</code>, SQL <code>DROP</code>/<code>TRUNCATE</code> always get their own snapshot, marked ⚠ with the reason. <code>agentundo list --dangerous</code> shows only those.</li>
+<li><b>Warns about remote databases.</b> When the agent writes to a database on another server, you get a warning that a local snapshot can't undo it. It only warns, never blocks, and passwords are shown as <code>***</code>.</li>
+<li><b>Works with Claude Code and Codex.</b> Runs locally. No account, no proxy, never touches your login tokens.</li></ul>
+<h2>Honest limits</h2><ul>
+<li>It only restores files in your project. It can't undo changes to remote databases, other folders, installed packages, or anything sent over the network.</li>
+<li>Dangerous-command detection uses fixed rules. Commands built from variables, or SQL inside a separate script file, can be missed.</li>
+<li>Tested on Linux. macOS and Windows are untested so far.</li></ul>
+<footer><a href="https://github.com/mulanxizhizi-png/agentundo">GitHub</a> · <a href="https://github.com/mulanxizhizi-png/agentundo/releases/tag/v0.1.2">v0.1.2</a> · Free and open source · Pairs with <a href="https://agentreceipt.netlify.app">agentreceipt</a></footer>
+</main></body></html>
+<script async src="/.netlify/scripts/hud?variant=public" data-nf-variant="public" data-netlify-site-id="3d3cfb46-c217-44ae-bd29-e748fde65b93" data-app-host="app.netlify.com" data-account-tier="free"></script>
