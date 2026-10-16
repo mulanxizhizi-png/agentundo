@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { homeDir, realRoot } = require('./store');
+const { homeDir, realRoot, migrateStore } = require('./store');
 
 const PKG_ROOT = path.resolve(__dirname, '..');
 const VERSION = require('../package.json').version;
@@ -140,8 +140,23 @@ const REPO_EXCLUDES = ['.agentundo-tmp-*/'];
 
 // ---- registry ----
 function registryPath(env = process.env) { return path.join(homeDir(env), 'projects.json'); }
-function readRegistry(env = process.env) {
+function readRawRegistry(env = process.env) {
   try { const r = JSON.parse(fs.readFileSync(registryPath(env), 'utf8')); return Array.isArray(r.projects) ? r.projects : []; } catch { return []; }
+}
+// Re-keys legacy (pre-0.1.3) entries to the canonical path, moving their store dir first so no snapshot is lost.
+function readRegistry(env = process.env) {
+  const raw = readRawRegistry(env);
+  let changed = false;
+  const out = raw.map((e) => {
+    if (!fs.existsSync(e)) return e;
+    const c = realRoot(e);
+    if (c === e) return e;
+    migrateStore(c, env, [e]);
+    changed = true;
+    return c;
+  });
+  if (changed) { try { writeRegistry(out, env); } catch {} }
+  return [...new Set(out)];
 }
 function writeRegistry(list, env = process.env) {
   const p = [...new Set(list)].sort();

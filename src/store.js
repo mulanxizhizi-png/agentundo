@@ -17,8 +17,56 @@ const DB_RE = /\.(sqlite3?|db)(-wal|-shm|-journal)?$/i;
 
 function homeDir(env = process.env) { return env.AGENTUNDO_HOME || path.join(os.homedir(), '.agentundo'); }
 function realRoot(root) { try { return fs.realpathSync.native(root); } catch { return path.resolve(root); } }
-function storeDir(root, env = process.env) {
-  return path.join(homeDir(env), 'stores', crypto.createHash('sha1').update(realRoot(root)).digest('hex').slice(0, 16));
+function storeDirFor(key, env = process.env) {
+  return path.join(homeDir(env), 'stores', crypto.createHash('sha1').update(key).digest('hex').slice(0, 16));
+}
+function storeDir(root, env = process.env) { return storeDirFor(realRoot(root), env); }
+
+// ---- backward compatibility with pre-0.1.3 path keys ----
+// Before 0.1.3 the key was fs.realpathSync (JS), which on macOS keeps the case the user typed and could
+// differ from the native canonical path. Old store dirs / registry entries keyed that way are found here
+// and migrated (rename, atomic on the same filesystem) to the canonical key. Nothing is ever deleted.
+function legacyRoot(root) { try { return fs.realpathSync(root); } catch { return path.resolve(root); } }
+function rawRegistry(env) {
+  try { const r = JSON.parse(fs.readFileSync(path.join(homeDir(env), 'projects.json'), 'utf8')); return Array.isArray(r.projects) ? r.projects : []; } catch { return []; }
+}
+function sameDir(a, b) {
+  if (a === b) return true;
+  try { const x = fs.statSync(a); const y = fs.statSync(b); return x.dev === y.dev && x.ino === y.ino; } catch { return false; }
+}
+function legacyKeys(root, env = process.env, extra = []) {
+  const canon = realRoot(root);
+  const keys = new Set([legacyRoot(root), path.resolve(root), ...extra]);
+  for (const e of rawRegistry(env)) if (e !== canon && sameDir(e, canon)) keys.add(e);
+  keys.delete(canon);
+  return [...keys];
+}
+const warned = new Set();
+function warnOnce(dir, msg) {
+  const marker = path.join(dir, 'superseded-by-new-store.txt');
+  if (warned.has(dir) || fs.existsSync(marker)) return;
+  warned.add(dir);
+  try { fs.writeFileSync(marker, msg + '\n'); } catch {}
+  process.stderr.write(`agentundo: ${msg}\n`);
+}
+// Returns the store dir to use for `root`, migrating a legacy store dir if needed.
+function migrateStore(root, env = process.env, extra = []) {
+  const canon = realRoot(root);
+  const dir = storeDirFor(canon, env);
+  for (const k of legacyKeys(root, env, extra)) {
+    const old = storeDirFor(k, env);
+    if (old === dir || !fs.existsSync(old)) continue;
+    if (fs.existsSync(path.join(old, 'superseded-by-new-store.txt')) && fs.existsSync(dir)) continue;
+    if (!fs.existsSync(dir)) {
+      try {
+        fs.renameSync(old, dir);
+        try { fs.writeFileSync(path.join(dir, 'project.json'), JSON.stringify({ root: canon, migratedFrom: k }, null, 2) + '\n'); } catch {}
+      } catch { return old; } // could not move it: keep using the old dir as-is, no data loss
+    } else {
+      warnOnce(old, `found an older snapshot store for ${canon} (keyed as ${k}) at ${old}; it was kept untouched and the newer store ${dir} is used.`);
+    }
+  }
+  return dir;
 }
 
 function readConfig(root) {
@@ -35,7 +83,7 @@ function readConfig(root) {
 class Store {
   constructor(root, env = process.env) {
     this.root = realRoot(root);
-    this.dir = storeDir(this.root, env);
+    this.dir = migrateStore(root, env);
     this.gitDir = path.join(this.dir, 'shadow.git');
     this.index = path.join(this.dir, 'index');
     this.metaFile = path.join(this.dir, 'meta.jsonl');
@@ -349,4 +397,4 @@ class Store {
   }
 }
 
-module.exports = { Store, homeDir, storeDir, realRoot, DEFAULTS, DEFAULT_EXCLUDES, MB };
+module.exports = { Store, homeDir, storeDir, storeDirFor, realRoot, legacyRoot, migrateStore, sameDir, DEFAULTS, DEFAULT_EXCLUDES, MB };
