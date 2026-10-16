@@ -10,9 +10,15 @@ const path = require('path');
 function planRestore(store, target, paths = []) {
   const cur = store.currentTree();
   const changes = store.changes(cur.tree, target.tree, paths);
+  const gone = changes.filter((c) => c.status === 'D').map((c) => c.path); // in current, not in target
+  // Never delete a file the target snapshot didn't capture (ignored then, excluded, oversized):
+  // its absence from the snapshot says nothing about whether it existed.
+  const remove = store.capturable(target, gone);
+  const keep = new Set(remove);
   return {
     write: changes.filter((c) => c.status !== 'D').map((c) => c.path), // A/M/T: (re)create from target
-    remove: changes.filter((c) => c.status === 'D').map((c) => c.path), // in current, not in target
+    remove,
+    keptUncaptured: gone.filter((p) => !keep.has(p)),
     skippedNow: cur.skipped,
   };
 }
@@ -54,7 +60,11 @@ async function restore(store, target, { paths = [], log = () => {} } = {}) {
     if (write.length) {
       store.git(['read-tree', target.tree], { index: restoreIndex });
       fs.rmSync(tmp, { recursive: true, force: true });
-      store.git(['checkout-index', '-f', '-z', '--stdin', `--prefix=${tmp}/`], { index: restoreIndex, input: write.join('\0') + '\0' });
+      try {
+        store.git(['checkout-index', '-f', '-z', '--stdin', `--prefix=${tmp}/`], { index: restoreIndex, input: write.join('\0') + '\0' });
+      } catch (e) {
+        throw new Error(`${e.message}. Nothing in your project was changed yet. Re-run \`agentundo restore ${target.id}\` to try again (your state before this restore is snapshot #${pre.id}).`);
+      }
     }
     let done = 0;
     for (const rel of write) {

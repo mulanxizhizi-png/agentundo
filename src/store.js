@@ -53,7 +53,10 @@ class Store {
         GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' },
     });
     if (r.error) throw r.error;
-    if (r.status !== 0 && !allowFail) throw new Error(`git ${args[0]} failed: ${String(r.stderr).trim().slice(0, 500)}`);
+    if (r.status !== 0 && !allowFail) {
+      const why = String(r.stderr).trim().slice(0, 500) || (r.signal ? `killed by ${r.signal}` : `exit code ${r.status}`);
+      throw new Error(`git ${args[0]} failed: ${why}${r.stderr && String(r.stderr).trim() && r.signal ? ` (${r.signal})` : ''}`);
+    }
     return allowFail ? { ok: r.status === 0, out: String(r.stdout) } : String(r.stdout);
   }
 
@@ -174,10 +177,20 @@ class Store {
   // label: { agent, session, turnKey, event: 'turn'|'tool'|'restore'|'manual', tool, command }
   // Returns the meta record (or the previous one when nothing changed), plus warnings.
   snapshot(label = {}, { force = false } = {}) {
+    const lost = !this.exists() && (fs.existsSync(this.metaFile) || fs.existsSync(this.stateFile));
     this.ensure();
     const unlock = this.lock();
     try {
       const warnings = [];
+      if (lost) {
+        // The shadow repo vanished (deleted by hand, disk cleanup...): old snapshots are gone. Start over
+        // with a fresh baseline and say so loudly instead of pretending the old ids still work.
+        for (const f of [this.metaFile, this.stateFile, this.journal, path.join(this.dir, 'marks.json'), this.index]) fs.rmSync(f, { force: true });
+        const msg = 'agentundo WARNING: the snapshot store was missing (deleted?); all earlier snapshots are lost. Took a new baseline now.';
+        this.logError(msg);
+        warnings.push(msg);
+        force = true;
+      }
       const { tree, skipped } = this.buildTree();
       const all = this.meta();
       const last = all[all.length - 1];
@@ -286,6 +299,36 @@ class Store {
 
   // Current working tree as a tree object (uses our index; does not create a snapshot).
   currentTree() { this.ensure(); const unlock = this.lock(); try { return this.buildTree(); } finally { unlock(); } }
+
+  // Of `paths`, those the target snapshot would have captured: not ignored by the target's own
+  // .gitignore files or agentundo's excludes, and not over the size cap now. Restore only deletes these.
+  capturable(target, paths) {
+    if (!paths.length) return [];
+    const tmp = path.join(this.dir, `rules-${process.pid}`);
+    const idx = path.join(this.dir, `rules-index-${process.pid}`);
+    try {
+      fs.rmSync(tmp, { recursive: true, force: true }); fs.mkdirSync(tmp, { recursive: true });
+      const ign = this.git(['ls-tree', '-r', '-z', '--name-only', target.tree]).split('\0').filter((p) => p === '.gitignore' || p.endsWith('/.gitignore'));
+      if (ign.length) {
+        this.git(['read-tree', target.tree], { index: idx });
+        this.git(['checkout-index', '-f', '-z', '--stdin', `--prefix=${tmp}/`], { index: idx, input: ign.join('\0') + '\0' });
+      }
+      const r = spawnSync('git', ['check-ignore', '--no-index', '-z', '--stdin'], {
+        cwd: tmp, input: paths.join('\0') + '\0', maxBuffer: 512 * MB,
+        env: { ...process.env, GIT_DIR: this.gitDir, GIT_WORK_TREE: tmp, GIT_INDEX_FILE: idx, GIT_CONFIG_NOSYSTEM: '1' },
+      });
+      if (r.status !== 0 && r.status !== 1) throw new Error(`git check-ignore failed: ${String(r.stderr).trim() || r.signal || r.status}`);
+      const ignored = new Set(String(r.stdout).split('\0').filter(Boolean));
+      const cap = this.cfg.maxFileMB * MB;
+      const skippedThen = new Set(target.skipped || []);
+      return paths.filter((p) => {
+        if (skippedThen.has(p)) return false;
+        if (ignored.has(p)) return DB_RE.test(p) && !this.defaultExcluded(p); // databases are force-included
+        try { const st = fs.lstatSync(path.join(this.root, p)); if (st.isFile() && st.size > cap) return false; } catch {}
+        return true;
+      });
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); fs.rmSync(idx, { force: true }); }
+  }
 
   // Changes needed to go from `fromTree` to `toTree`: [{status, path}] limited to paths.
   changes(fromTree, toTree, paths = []) {

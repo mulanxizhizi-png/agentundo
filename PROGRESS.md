@@ -25,6 +25,13 @@
   - Codex CLI 0.163（`codex exec --dangerously-bypass-hook-trust`）：agent 执行 `rm -r src scratch.txt` 前拍到了快照（列表显示 `before rm -r src scratch.txt ⚠`），`restore` 后 src 和没被 git 跟踪的 scratch.txt 都回来了，git 跟踪的文件状态干净。另外：Codex 自己的规则会拒绝 `rm -rf`，所以改用 `rm -r` 测。
   - Claude Code 2.1.x（DeepSeek 接口）：agent 先用 Write 建文件，再执行 `rm -rf src`。列表显示 `before Write`、`before rm -rf src ⚠`，`restore` 后 src（含未跟踪文件）全部回来，`git status` 里没有已跟踪文件的改动，`diff` 显示无差异。
 
+### 部署复测问题修复（仍为 v0.1.0）
+1. **数据丢失**：快照时被 `.gitignore` 忽略的文件，后来改了 `.gitignore` 再恢复，会被误删。现在恢复时只删除目标快照按当时规则本来会存下的文件。被忽略、被默认排除（`node_modules`、`.env`）或超过大小上限的文件一律不删，并在确认列表里列出“kept”。已用部署给的复现步骤加了回归测试。
+2. 解包失败时，报错里会写明 git 的错误信息，或者退出码和信号，并告诉用户可以重跑哪条命令、恢复前的状态是哪张快照。
+3. 在确认提示里回答 n，退出码改为 1，和 agentreceipt 一致。
+4. `--` 后面的 `--yes`、`-y`、`--dry-run` 当作选项处理，不再当成路径，并给出提示。
+5. 影子仓库被删后，下一次钩子会自动重建并拍新的基线，同时明确提示旧快照已经丢失，并记进 `status` 的最近失败。
+
 ### 已知缺口 / 待部署复测
 - 终端里手动输入 y/n 确认那一步没有自动化测试，请部署实际跑一遍。
 - Codex 交互模式下要在 `/hooks` 里信任一次，未在交互 TUI 里实测。

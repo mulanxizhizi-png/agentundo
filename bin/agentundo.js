@@ -10,8 +10,13 @@ const { restore, planRestore } = require('../src/restore');
 
 const argv = process.argv.slice(2);
 const dd = argv.indexOf('--');
-const args = dd >= 0 ? argv.slice(0, dd) : argv;
-const pathsArg = dd >= 0 ? argv.slice(dd + 1) : [];
+// Everything after `--` is a path, except the flags --yes/-y/--dry-run, which are accepted there too
+// (nobody means a file literally named --yes); a note is printed when that happens.
+const FLAGS_AFTER_DD = new Set(['--yes', '-y', '--dry-run']);
+const afterDD = dd >= 0 ? argv.slice(dd + 1) : [];
+const movedFlags = afterDD.filter((a) => FLAGS_AFTER_DD.has(a));
+const args = [...(dd >= 0 ? argv.slice(0, dd) : argv), ...movedFlags];
+const pathsArg = afterDD.filter((a) => !FLAGS_AFTER_DD.has(a));
 const cmd = args[0];
 const flag = (n) => args.includes(n);
 const opt = (n, d) => { const i = args.indexOf(n); return i >= 0 && args[i + 1] ? args[i + 1] : d; };
@@ -154,8 +159,13 @@ async function doRestore() {
   if (m.skipped && m.skipped.length) console.log(c('33', `  note: not in this snapshot (over size cap): ${m.skipped.join(', ')}`));
   if (!plan.write.length && !plan.remove.length && !fs.existsSync(s.journal)) return console.log('Nothing to do: the working tree already matches.');
   if (flag('--dry-run')) return console.log('(dry run, nothing changed)');
-  if (!(await confirm('Proceed? Your current state is snapshotted first, so this can be undone. [y/N] '))) { console.log('Cancelled, nothing changed.'); return; }
-  const r = await restore(s, m, { paths: pathsArg, log: (x) => console.log(x) });
+  if (plan.keptUncaptured.length) console.log(c('2', `  kept (not captured by that snapshot: ignored/excluded/too big): ${plan.keptUncaptured.slice(0, 5).join(', ')}${plan.keptUncaptured.length > 5 ? ', …' : ''}`));
+  if (movedFlags.length) console.log(c('2', `  note: treating ${movedFlags.join(' ')} after -- as option(s), not paths`));
+  if (!(await confirm('Proceed? Your current state is snapshotted first, so this can be undone. [y/N] '))) { console.log('Cancelled, nothing changed.'); process.exitCode = 1; return; }
+  let r;
+  try { r = await restore(s, m, { paths: pathsArg, log: (x) => console.log(x) }); } catch (e) {
+    die(`restore failed: ${e.message}`);
+  }
   if (r.interrupted) {
     console.log(c('33', `Interrupted after ${r.done} change(s). Re-run \`agentundo restore ${m.id}\` to finish, or \`agentundo restore ${r.pre.id}\` to go back.`));
     process.exitCode = 130; return;
@@ -235,7 +245,7 @@ async function uninstall() {
     if (stores.length) {
       console.log('--purge will permanently delete the snapshots of:');
       for (const s of stores) console.log(`  ${s.root} (${s.meta().length} snapshots, ${(s.sizeBytes() / MB).toFixed(1)}MB)`);
-      if (!(await confirm('Delete these snapshots? [y/N] '))) { console.log('Cancelled, nothing changed.'); return; }
+      if (!(await confirm('Delete these snapshots? [y/N] '))) { console.log('Cancelled, nothing changed.'); process.exitCode = 1; return; }
     }
   }
   const summary = [];

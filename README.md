@@ -49,7 +49,9 @@ agentundo uninstall [--global] [--purge] [--yes]
 `<id>` is a snapshot number (`3`), the start of a turn (`t2`), or a step inside a turn (`t2.1` = turn 2, before its first command).
 
 - **restore always snapshots the current state first**, so every restore can be undone (`Undo this restore: agentundo restore <n>`).
-- `restore <id> -- src/foo.js docs/` only restores those paths and leaves the agent's other changes alone.
+- `restore <id> -- src/foo.js docs/` only restores those paths and leaves the agent's other changes alone. Everything after `--` is a path, except `--yes`, `-y`, and `--dry-run`, which are accepted on either side of `--`.
+- restore only deletes files the snapshot would have captured. Files that were ignored, excluded (`node_modules`, `.env`…), or over the size cap at snapshot time are never deleted, even if your `.gitignore` changed since then.
+- Answering `n` at the prompt cancels the restore and exits with code 1.
 - restore lists what it will write and remove and asks first. Without a terminal it refuses unless you pass `--yes`.
 - Files are written to a temp folder and renamed into place one by one. If a restore is interrupted (Ctrl+C, crash), agentundo remembers it: re-run the same `restore` to finish, or restore the pre-restore snapshot to go back.
 
@@ -60,6 +62,7 @@ agentundo uninstall [--global] [--purge] [--yes]
 - Included: tracked and untracked files, symlinks, the executable bit, binaries, and SQLite databases (`*.db`, `*.sqlite`, `*.sqlite3` with `-wal`/`-shm`), even if your `.gitignore` ignores them.
 - Excluded by default: whatever your `.gitignore` ignores, plus `node_modules/ .venv/ venv/ __pycache__/ dist/ build/ target/ .next/ .nuxt/ .cache/ coverage/` and `.env` / `.env.*` (except `.env.example`).
 - Caps: files over **50MB** are skipped. You get a warning each time, and `list` shows the skipped files. Total storage is capped at **2GB**. Over the cap, the oldest snapshots are deleted (the newest 20 are always kept) and you are told **every time**. Snapshotting never stops silently.
+- If the snapshot store is deleted, the next hook recreates it, takes a new baseline, and warns that earlier snapshots are lost.
 - Hooks fail open. If a snapshot fails, the agent keeps working, the error is logged (`agentundo status`), and the agent shows a `systemMessage` saying that step isn't undoable. A hook adds about 60ms per tool call in a 5,000-file repo.
 
 Optional `.agentundo/config.json` in the project:
@@ -77,7 +80,7 @@ Optional `.agentundo/config.json` in the project:
 - A SQLite file snapshotted while another process is writing to it may be inconsistent. Close the app using the database before you restore.
 - Some special agent tools may not trigger the per-command hook. The per-turn snapshot is the fallback, so you can go back to the start of that turn.
 - Restore is atomic per file, not for the whole tree. An interrupted restore can be finished or undone as described above.
-- Needs git. Windows is untested in v0.1.
+- Needs git. Tested on Linux; macOS untested in v0.1. Windows is untested in v0.1.
 
 ## Uninstall
 

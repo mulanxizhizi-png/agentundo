@@ -293,3 +293,88 @@ test('dangerous / cannot-undo heads-up', () => {
   assert.ok(!cannotUndo('rm -rf /p/src', '/p'));
   assert.ok(!cannotUndo('rm -rf src', '/p'));
 });
+
+test('deploy repro: file ignored at snapshot time is never deleted after .gitignore is emptied', () => {
+  const env = freshEnv();
+  const d = tmpProject({ '.gitignore': 'secret/\n', 'a.txt': '1' });
+  fs.mkdirSync(path.join(d, 'secret')); fs.writeFileSync(path.join(d, 'secret/s.txt'), 'v1');
+  assert.strictEqual(run(env, d, ['init']).code, 0);
+  fs.writeFileSync(path.join(d, '.gitignore'), '');
+  fs.writeFileSync(path.join(d, 'secret/s.txt'), 'v2');
+  const r = run(env, d, ['restore', '1', '--yes']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /kept \(not captured/);
+  assert.strictEqual(fs.readFileSync(path.join(d, 'secret/s.txt'), 'utf8'), 'v2');
+  assert.strictEqual(fs.readFileSync(path.join(d, '.gitignore'), 'utf8'), 'secret/\n');
+});
+
+test('restore never deletes excluded/oversized files that the target did not capture; does delete truly new files', () => {
+  const env = { ...freshEnv(), AGENTUNDO_MAX_FILE_MB: '1' };
+  const d = tmpProject({ 'a.txt': '1', '.gitignore': '' });
+  fs.mkdirSync(path.join(d, 'node_modules/x'), { recursive: true });
+  run(env, d, ['init']);
+  // created after the snapshot, but would not have been captured anyway
+  fs.writeFileSync(path.join(d, 'node_modules/x/i.js'), 'x');
+  fs.writeFileSync(path.join(d, '.env'), 'K=1');
+  fs.writeFileSync(path.join(d, 'big.bin'), Buffer.alloc(2 * 1024 * 1024, 1));
+  fs.writeFileSync(path.join(d, 'new.txt'), 'agent junk');
+  fs.writeFileSync(path.join(d, 'app.db'), 'db created later'); // dbs ARE captured, so a new one is removed
+  const r = run(env, d, ['restore', '1', '--yes']);
+  assert.strictEqual(r.code, 0, r.out);
+  for (const f of ['node_modules/x/i.js', '.env', 'big.bin']) assert.ok(fs.existsSync(path.join(d, f)), f);
+  assert.ok(!fs.existsSync(path.join(d, 'new.txt')));
+  assert.ok(!fs.existsSync(path.join(d, 'app.db')));
+});
+
+test('answering n at the confirm prompt exits 1 and changes nothing', { skip: !hasScript() }, () => {
+  const { env, d } = setup({ 'a.txt': '1' });
+  fs.writeFileSync(path.join(d, 'a.txt'), '2');
+  const r = require('child_process').spawnSync('script', ['-qec', `printf 'n\\n' | true; ${process.execPath} ${BIN} restore 1`, '/dev/null'], { cwd: d, env, input: 'n\n', encoding: 'utf8', timeout: 20000 });
+  assert.match(r.stdout, /Cancelled/);
+  assert.strictEqual(r.status, 1);
+  assert.strictEqual(fs.readFileSync(path.join(d, 'a.txt'), 'utf8'), '2');
+});
+function hasScript() { try { execFileSync('script', ['--version'], { stdio: 'ignore' }); return true; } catch { return false; } }
+
+test('--yes / --dry-run after -- are options, not paths', () => {
+  const { env, d } = setup({ 'src/a.js': 'a', 'b.txt': 'b' });
+  fs.writeFileSync(path.join(d, 'src/a.js'), 'x'); fs.writeFileSync(path.join(d, 'b.txt'), 'y');
+  const r = run(env, d, ['restore', '1', '--', 'src', '--yes']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /treating --yes after -- as option/);
+  assert.strictEqual(fs.readFileSync(path.join(d, 'src/a.js'), 'utf8'), 'a');
+  assert.strictEqual(fs.readFileSync(path.join(d, 'b.txt'), 'utf8'), 'y');
+});
+
+test('checkout failure: error names the cause and how to recover', async () => {
+  const { env, d } = setup({ 'a.txt': '1' });
+  const { Store } = require('../src/store');
+  const s = new Store(d, env);
+  fs.writeFileSync(path.join(d, 'a.txt'), '2');
+  // corrupt the object of a.txt@snapshot1 so checkout-index fails
+  const blob = execFileSync('git', ['--git-dir', s.gitDir, 'rev-parse', `${s.meta()[0].tree}:a.txt`], { encoding: 'utf8' }).trim();
+  const obj = path.join(s.gitDir, 'objects', blob.slice(0, 2), blob.slice(2));
+  fs.chmodSync(obj, 0o644); fs.writeFileSync(obj, 'garbage');
+  const r = run(env, d, ['restore', '1', '--yes']);
+  assert.strictEqual(r.code, 1);
+  assert.match(r.out, /git (read-tree|checkout-index) failed: \S/);
+  assert.match(r.out, /Re-run `agentundo restore 1`|restore failed/);
+  assert.strictEqual(fs.readFileSync(path.join(d, 'a.txt'), 'utf8'), '2');
+});
+
+test('deleted shadow repo: hook recreates it, warns that history was lost, takes a new baseline', () => {
+  const { env, d } = setup({ 'a.txt': '1' });
+  bash(env, d, 'rm -rf x');
+  const { Store } = require('../src/store');
+  fs.rmSync(new Store(d, env).gitDir, { recursive: true });
+  fs.writeFileSync(path.join(d, 'a.txt'), '2');
+  const h = bash(env, d, 'rm a.txt');
+  assert.strictEqual(h.code, 0);
+  assert.match(JSON.parse(h.stdout).systemMessage, /earlier snapshots are lost/);
+  assert.match(run(env, d, ['status']).out, /last failure: .*snapshot store was missing/);
+  const out = run(env, d, ['list']).out;
+  assert.match(out, /^1 /m); assert.doesNotMatch(out, /^2 /m);
+  fs.writeFileSync(path.join(d, 'a.txt'), '3');
+  assert.strictEqual(run(env, d, ['restore', '1', '--yes']).code, 0);
+  assert.strictEqual(fs.readFileSync(path.join(d, 'a.txt'), 'utf8'), '2');
+});
