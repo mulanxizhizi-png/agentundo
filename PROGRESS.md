@@ -1,5 +1,10 @@
 # agentundo 进度
 
+## v0.1.3（2026-10-16 晚）：项目目录被删时提示改温和
+- 已登记的项目目录被删后，钩子不再报「snapshot FAILED」，改为提示「agentundo: project directory no longer exists, skipped snapshot」。退出码仍是 0，不会拦截 agent。
+- 查了其他会输出 FAILED 的地方：只剩快照真正出错（比如快照仓库损坏）时的提示，这种情况确实没法撤销，保留原样。卸载时的提示本来就是「no longer exists」，没改。
+- 新增 1 个测试（PreToolUse 和 UserPromptSubmit 都覆盖，真实跑 hook 进程），共 41 个，连跑 10 次全部通过。
+
 ## v0.1.2（2026-10-16 晚）：危险命令提醒
 - 重写危险命令识别（`src/danger.js`）：按 shell 语法拆分命令，只看真正执行的程序（跳过 sudo/env/xargs/timeout 等，`bash -c` 递归分析）。覆盖 `rm -r/-rf/-fr/-r -f/--recursive --force`、`git reset --hard`、`git clean -fd/-fdx/-xdf`、`git checkout -- .`、`git restore .`、`find -delete` 等；SQL 的 `DROP TABLE/DATABASE`、`TRUNCATE`、`DELETE FROM` 只在运行数据库客户端时才算（含 `psql -c`、`mysql -e`、`sqlite3 db "..."`、管道给 psql）。`echo rm -rf`、grep、提交信息里的文字不算。
 - 危险命令一定单独拍一张快照（即使文件没变化），`list` 里标「⚠ dangerous (原因)」，新增 `list --dangerous` 只看这些；钩子同时提示「已先存快照 #N，撤销用 agentundo restore N」。

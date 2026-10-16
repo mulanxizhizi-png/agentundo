@@ -398,3 +398,19 @@ test('uninstall --global --purge --yes survives a deleted registered project (wa
   assert.ok(!fs.existsSync(path.join(env.AGENTUNDO_HOME, 'stores')) || fs.readdirSync(path.join(env.AGENTUNDO_HOME, 'stores')).length === 0);
   assert.ok(!fs.existsSync(path.join(env.AGENTUNDO_HOME, 'projects.json')) || JSON.parse(fs.readFileSync(path.join(env.AGENTUNDO_HOME, 'projects.json'), 'utf8')).projects.length === 0);
 });
+
+test('v0.1.3: hook in a deleted project dir -> calm skip message, exit 0, no FAILED', () => {
+  const env = freshEnv();
+  const gone = tmpProject({ 'a.txt': '1' });
+  assert.strictEqual(run(env, gone, ['init', '--agent', 'claude']).code, 0);
+  fs.rmSync(gone, { recursive: true, force: true });
+  const { handle } = require('../src/hook');
+  for (const p of [{ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'rm -rf src' } }, { hook_event_name: 'UserPromptSubmit' }]) {
+    const msg = handle({ ...p, cwd: gone, session_id: 's' }, 'claude', env);
+    assert.strictEqual(msg, 'agentundo: project directory no longer exists, skipped snapshot');
+  }
+  const r = require('child_process').spawnSync(process.execPath, [BIN, 'hook', '--agent', 'claude'], { cwd: os.tmpdir(), env, input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' }, cwd: gone }), encoding: 'utf8' });
+  assert.strictEqual(r.status, 0);
+  assert.doesNotMatch(r.stdout + r.stderr, /FAILED/);
+  assert.match(JSON.parse(r.stdout).systemMessage, /no longer exists, skipped snapshot/);
+});

@@ -1,4 +1,5 @@
 'use strict';
+const fs = require('fs');
 // Hook entry for Codex and Claude Code (PreToolUse + UserPromptSubmit).
 // Contract: always exit 0, never print anything that could be read as a decision; failures are
 // logged and surfaced as a systemMessage so the user knows a snapshot was missed.
@@ -31,6 +32,8 @@ function handle(payload, agent, env = process.env) {
   const cwd = payload.cwd || process.cwd();
   const root = findProject(cwd, env);
   if (!root) return null; // Codex hooks are global; projects without agentundo are ignored
+  // The registered project dir was deleted (agent ran from a stale cwd): nothing to snapshot. Stay calm, never block.
+  if (!fs.existsSync(root)) return 'agentundo: project directory no longer exists, skipped snapshot';
   const event = payload.hook_event_name;
   const store = new Store(root, env);
   const turnKey = payload.turn_id || payload.prompt_id || null;
