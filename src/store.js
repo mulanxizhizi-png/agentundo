@@ -16,7 +16,7 @@ const ENV_EXCLUDES = ['.env', '.env.*', '!.env.example', '!.env.sample'];
 const DB_RE = /\.(sqlite3?|db)(-wal|-shm|-journal)?$/i;
 
 function homeDir(env = process.env) { return env.AGENTUNDO_HOME || path.join(os.homedir(), '.agentundo'); }
-function realRoot(root) { try { return fs.realpathSync(root); } catch { return path.resolve(root); } }
+function realRoot(root) { try { return fs.realpathSync.native(root); } catch { return path.resolve(root); } }
 function storeDir(root, env = process.env) {
   return path.join(homeDir(env), 'stores', crypto.createHash('sha1').update(realRoot(root)).digest('hex').slice(0, 16));
 }
