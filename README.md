@@ -1,0 +1,98 @@
+# agentundo
+
+**An undo button for coding agents.** agentundo snapshots your project right before every command Codex or Claude Code runs (`rm`, `mv`, scripts, file edits) and at the start of every turn. When the agent deletes or breaks something, one command takes you back:
+
+```
+$ agentundo list
+ID    TURN    WHEN     AGENT   FILES  SNAPSHOT TAKEN
+1     t0      10s ago  -       -      baseline (agentundo init)
+2     t1.1    6s ago   claude  0      before Write notes.md
+3     t1.2    4s ago   claude  1      before rm -rf src ⚠ dangerous
+4     t1.3    2s ago   claude  3      before ls
+
+$ agentundo restore 3
+Restore snapshot #3 (t1.2, before rm -rf src)
+  3 file(s) to write back, 0 file(s) to remove
+Proceed? Your current state is snapshotted first, so this can be undone. [y/N] y
+Restored #3: wrote 3, removed 0.
+Undo this restore: agentundo restore 5
+```
+
+Claude Code's `/rewind` [does not track files changed by Bash commands](https://code.claude.com/docs/en/checkpointing). agentundo does, including files git doesn't track, for both Codex and Claude Code.
+
+## Install
+
+Requires Node 20+ and git. In your project folder:
+
+```
+npx github:mulanxizhizi-png/agentundo#v0.1.0 init
+```
+
+This installs hooks for both agents (`--agent codex` or `--agent claude` for one) and takes a baseline snapshot. After init you can also call `~/.agentundo/bin/agentundo` directly.
+
+- **Codex**: hooks go to `~/.codex/hooks.json` (user level; they do nothing in folders where you didn't run init). Codex asks you to trust new hooks once: start `codex`, open `/hooks`, and trust the two `agentundo-hook` entries (`PreToolUse`, `UserPromptSubmit`).
+- **Claude Code**: hooks go to `.claude/settings.local.json` in the project (not committed; agentundo adds it to `.git/info/exclude`). Use `--claude-scope user` for `~/.claude/settings.json` instead.
+
+## Commands
+
+```
+agentundo list [--limit 20 | --all]          snapshots: id, turn, the command it preceded, ⚠ for dangerous ones
+agentundo diff <id> [--patch] [-- <paths>]   what changed between that snapshot and now
+agentundo restore <id> [--dry-run] [--yes] [-- <paths>]
+agentundo snap [note]                        take a snapshot by hand
+agentundo status                             storage, caps, hooks, last failure
+agentundo prune --keep <n>
+agentundo uninstall [--global] [--purge] [--yes]
+```
+
+`<id>` is a snapshot number (`3`), the start of a turn (`t2`), or a step inside a turn (`t2.1` = turn 2, before its first command).
+
+- **restore always snapshots the current state first**, so every restore can be undone (`Undo this restore: agentundo restore <n>`).
+- `restore <id> -- src/foo.js docs/` only restores those paths and leaves the agent's other changes alone.
+- restore lists what it will write and remove and asks first. Without a terminal it refuses unless you pass `--yes`.
+- Files are written to a temp folder and renamed into place one by one. If a restore is interrupted (Ctrl+C, crash), agentundo remembers it: re-run the same `restore` to finish, or restore the pre-restore snapshot to go back.
+
+## How it works
+
+- Snapshots live in a private git repo **outside your project**: `~/.agentundo/stores/<hash>/`. agentundo runs git with its own `GIT_DIR`, work tree, and index, so your `.git` (history, index, branches, stash) is never read or changed, and an agent running `rm -rf .` can't delete the snapshots. Projects without git work too.
+- Identical files are stored once. When nothing changed, no new snapshot is made, except that the first command of each turn and dangerous commands always get a `before …` entry.
+- Included: tracked and untracked files, symlinks, the executable bit, binaries, and SQLite databases (`*.db`, `*.sqlite`, `*.sqlite3` with `-wal`/`-shm`), even if your `.gitignore` ignores them.
+- Excluded by default: whatever your `.gitignore` ignores, plus `node_modules/ .venv/ venv/ __pycache__/ dist/ build/ target/ .next/ .nuxt/ .cache/ coverage/` and `.env` / `.env.*` (except `.env.example`).
+- Caps: files over **50MB** are skipped. You get a warning each time, and `list` shows the skipped files. Total storage is capped at **2GB**. Over the cap, the oldest snapshots are deleted (the newest 20 are always kept) and you are told **every time**. Snapshotting never stops silently.
+- Hooks fail open. If a snapshot fails, the agent keeps working, the error is logged (`agentundo status`), and the agent shows a `systemMessage` saying that step isn't undoable. A hook adds about 60ms per tool call in a 5,000-file repo.
+
+Optional `.agentundo/config.json` in the project:
+
+```json
+{ "maxFileMB": 50, "maxTotalMB": 2048, "keepMin": 20, "includeEnv": false, "exclude": ["data/raw/"] }
+```
+
+## Limitations
+
+- **Remote databases and cloud resources can't be restored.** `DROP TABLE` on a remote Postgres, `git push --force`, `terraform destroy`, or API calls are outside the project. agentundo warns when it sees such commands, but a local snapshot can't undo them.
+- **Files outside the project folder are not snapshotted.** `rm -rf ~/Documents` can't be undone. agentundo only warns.
+- **`.env` files are not snapshotted** by default, to keep secrets out of the store. Set `"includeEnv": true` to include them. Snapshots stay on your machine either way.
+- Files ignored by your `.gitignore` (other than database files) and the default excluded folders are not snapshotted. `restore` never deletes them.
+- A SQLite file snapshotted while another process is writing to it may be inconsistent. Close the app using the database before you restore.
+- Some special agent tools may not trigger the per-command hook. The per-turn snapshot is the fallback, so you can go back to the start of that turn.
+- Restore is atomic per file, not for the whole tree. An interrupted restore can be finished or undone as described above.
+- Needs git. Windows is untested in v0.1.
+
+## Uninstall
+
+```
+agentundo uninstall            # this project: removes its hooks and exclude block, keeps snapshots
+agentundo uninstall --global   # every project
+agentundo uninstall --purge    # also delete the snapshots (asks first; --yes without a terminal)
+```
+
+Uninstall only removes what agentundo added, and prints what it deleted and kept for each project. The Codex hook and the runtime are removed once no project uses them.
+
+## Works well with
+
+- [agentreceipt](https://github.com/mulanxizhizi-png/agentreceipt): makes the agent show passing tests before it says "done". agentreceipt catches agents that falsely claim the work is done. agentundo undoes accidental deletions.
+- [cc-safety-net](https://github.com/kenryu42/cc-safety-net): blocks dangerous commands before they run. agentundo is the backstop for everything a blocker lets through.
+
+## License
+
+MIT
