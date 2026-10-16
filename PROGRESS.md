@@ -1,5 +1,17 @@
 # agentundo 进度
 
+## v0.1.2（2026-10-16 晚）：危险命令提醒
+- 重写危险命令识别（`src/danger.js`）：按 shell 语法拆分命令，只看真正执行的程序（跳过 sudo/env/xargs/timeout 等，`bash -c` 递归分析）。覆盖 `rm -r/-rf/-fr/-r -f/--recursive --force`、`git reset --hard`、`git clean -fd/-fdx/-xdf`、`git checkout -- .`、`git restore .`、`find -delete` 等；SQL 的 `DROP TABLE/DATABASE`、`TRUNCATE`、`DELETE FROM` 只在运行数据库客户端时才算（含 `psql -c`、`mysql -e`、`sqlite3 db "..."`、管道给 psql）。`echo rm -rf`、grep、提交信息里的文字不算。
+- 危险命令一定单独拍一张快照（即使文件没变化），`list` 里标「⚠ dangerous (原因)」，新增 `list --dangerous` 只看这些；钩子同时提示「已先存快照 #N，撤销用 agentundo restore N」。
+- 远程数据库提醒：连接串或 `-h`/`PGHOST`/`DATABASE_URL` 指向非本机地址、且有写入/破坏性 SQL/迁移工具时，提示「⚠ agentundo: this step touches a remote database (<host>) — local snapshots cannot undo it.」。只提醒不拦截，出错一律放行。本机、unix socket、只读查询不提醒。
+- 脱敏：连接串密码、`*_PASSWORD=`、`--password=`、`mysql -p密码`、`redis-cli -a` 在存储、列表、日志、提示里都换成 `***`。
+- 修复部署发现的问题：Codex 第一轮的 `rm a.txt` 没有单独的「before rm a.txt」快照。原因是轮次开始时刚拍过一张，文件没变化，第一条命令就被合并掉了。现在每轮第一条命令、以及所有删/移文件的命令都单独记一条。已加复现测试。
+- 测试：新增 12 个（大量正反例、本机/远程、脱敏、单独快照、Codex 首条命令复现），共 39 个，连跑 10 次全部通过。
+- 真实端到端（用独立的 AGENTUNDO_HOME/CODEX_HOME，没碰 box 上的全局安装，测完已删除）：
+  - Claude Code 2.1.301（DeepSeek）：`rm -rf src` 前单独拍了快照并标 ⚠，restore 后 src（含未跟踪文件）回来；远程 psql 命令出现远程数据库提醒，列表和存储里密码都是 `***`。
+  - Codex 0.163：`rm b.txt`（每轮第一条）、`rm -rf src`、远程 psql 都有单独快照和标记；TUI 里显示「↳ Hook · ⚠ agentundo: this step touches a remote database (db.example.com) …」。
+- 已知缺口：`codex exec` 非交互模式不显示钩子消息（TUI 显示）；agent 自己的界面仍会显示它执行的原始命令（含密码），这不归 agentundo 管；macOS 仍未测。
+
 ## v0.1.1（2026-10-16 晚）：和 agentreceipt 打通
 - 新增给程序调用的稳定接口：`agentundo receipt --status green|red|blocked --json` 会拍下验证时的状态（文件没变化就不新建），在这张快照上记下收据结果，并返回最后一张测试通过的快照编号和恢复命令。另外新增 `snap --json [--label]` 和 `list --json`。项目没初始化时返回 `ok:false`，退出码始终是 0。
 - `list` 会在对应的快照后面标“✓ tests passed”或“✗ tests failed”，并在底部提示最后一张测试通过的快照。

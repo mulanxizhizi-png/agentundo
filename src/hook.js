@@ -5,7 +5,7 @@
 const path = require('path');
 const { Store } = require('./store');
 const { findProject } = require('./install');
-const { cannotUndo } = require('./danger');
+const { cannotUndo, analyze, remoteWarning, redact } = require('./danger');
 
 const READ_ONLY = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'TodoWrite', 'TodoRead', 'Task', 'Agent', 'ExitPlanMode', 'BashOutput', 'KillShell', 'NotebookRead', 'ListMcpResourcesTool', 'ReadMcpResourceTool', 'view_image', 'update_plan', 'web_search']);
 
@@ -18,7 +18,11 @@ function describe(tool, input) {
     }
     return input.command;
   }
-  if (Array.isArray(input.command)) return input.command.join(' ');
+  if (Array.isArray(input.command)) {
+    const a = input.command;
+    if (a.length === 3 && /(^|\/)(ba|z|da)?sh$/.test(a[0]) && /^-l?c$/.test(a[1])) return a[2]; // ["bash","-lc","<script>"]
+    return a.join(' ');
+  }
   if (input.file_path || input.notebook_path) return `${tool} ${input.file_path || input.notebook_path}`;
   return tool;
 }
@@ -38,15 +42,20 @@ function handle(payload, agent, env = process.env) {
     label = { event: 'tool', agent, session: payload.session_id, turnKey, tool, command: describe(tool, payload.tool_input) };
   } else return null;
   const msgs = [];
+  let a = { dangerous: false, reasons: [], remote: [] };
+  try { if (label.command) a = analyze(label.command); } catch {}
+  // Remote DB first: it is the one thing a local snapshot can never undo.
+  if (a.remote.length) msgs.push(remoteWarning(a.remote));
   try {
     const r = store.snapshot(label);
     msgs.push(...r.warnings);
+    if (a.dangerous && r.snap) msgs.push(`agentundo: ⚠ ${a.reasons.join(', ')} — saved snapshot #${r.snap.id} first. Undo: agentundo restore ${r.snap.id}`);
   } catch (e) {
     store.logError(`${event}: ${e.message}`);
     msgs.push(`agentundo: snapshot FAILED, this step is not undoable (${e.message.slice(0, 200)}). Details: agentundo status`);
   }
-  if (label.command && cannotUndo(label.command, store.root)) msgs.push(`agentundo: heads-up, this command may change things outside the project (databases, remote, other folders); a local snapshot can't undo that.`);
-  return msgs.length ? msgs.join('\n') : null;
+  if (label.command && !a.remote.length && cannotUndo(label.command, store.root)) msgs.push(`agentundo: heads-up, this command may change things outside the project (databases, remote, other folders); a local snapshot can't undo that.`);
+  return msgs.length ? redact(msgs.join('\n')) : null;
 }
 
 async function main(agent) {

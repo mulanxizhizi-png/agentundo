@@ -78,7 +78,7 @@ function help() {
   console.log(`agentundo ${I.VERSION} - an undo button for coding agents (Codex, Claude Code)
 
   agentundo init [--agent codex|claude] [--claude-scope local|user]
-  agentundo list [--limit 20]            snapshots: id, turn, what it ran before
+  agentundo list [--limit 20|--all] [--dangerous]   snapshots: id, turn, what it ran before (⚠ = dangerous)
   agentundo diff <id> [--patch] [-- <paths>]   snapshot vs. working tree
   agentundo restore <id> [--dry-run] [--yes] [-- <paths>]
   agentundo snap [note]                  take a snapshot now
@@ -120,16 +120,18 @@ function list() {
   journalNotice(s);
   const all = s.metaWithMarks();
   if (flag('--json')) { const g = s.lastGreen(); return console.log(JSON.stringify({ schemaVersion: 1, root: s.root, lastGreen: g ? g.id : null, snapshots: all.map(({ tree, commit, ...m }) => ({ ...m, label: label(m) })) })); }
-  const lim = flag('--all') ? all.length : Number(opt('--limit', 20));
-  const rows = all.slice(-lim);
-  if (!rows.length) return console.log('no snapshots yet');
+  const pool = flag('--dangerous') ? all.filter((m) => m.dangerous || (m.remoteDb && m.remoteDb.length)) : all;
+  const lim = flag('--all') ? pool.length : Number(opt('--limit', 20));
+  const rows = pool.slice(-lim);
+  if (!rows.length) return console.log(flag('--dangerous') ? 'no dangerous commands recorded' : 'no snapshots yet');
   console.log(c('2', `${'ID'.padEnd(5)} ${'TURN'.padEnd(7)} ${'WHEN'.padEnd(8)} ${'AGENT'.padEnd(7)} ${'FILES'.padEnd(5)}  SNAPSHOT TAKEN`));
   for (const m of rows) {
     const t = m.step ? `t${m.turn}.${m.step}` : `t${m.turn}`;
-    const danger = m.dangerous ? c('31', ' ⚠ dangerous') : '';
+    const why = [...(m.reasons || []), ...(m.remoteDb && m.remoteDb.length ? [`remote DB ${m.remoteDb.join(', ')}: not undoable`] : [])];
+    const danger = m.dangerous || why.length ? c('31', ` ⚠ dangerous${why.length ? ` (${why.join('; ')})` : ''}`) : '';
     console.log(`${String(m.id).padEnd(5)} ${t.padEnd(7)} ${ago(m.ts).padEnd(8)} ${String(m.agent || '-').padEnd(7)} ${String(m.changed == null ? '-' : m.changed).padEnd(5)}  ${m.dangerous ? c('1', label(m)) : label(m)}${danger}${m.receipt ? (m.receipt.status === 'green' ? c('32', ' ✓ tests passed') : c('31', ` ✗ tests ${m.receipt.status === 'blocked' ? 'failed (agent sent back)' : 'failed'}`)) : ''}${m.skipped && m.skipped.length ? c('33', ` (${m.skipped.length} big file(s) not saved)`) : ''}`);
   }
-  if (all.length > rows.length) console.log(c('2', `(${all.length - rows.length} older; --all to show)`));
+  if (pool.length > rows.length) console.log(c('2', `(${pool.length - rows.length} older; --all to show)`));
   const g = s.lastGreen();
   if (g) console.log(c('32', `Last snapshot where tests passed (agentreceipt): #${g.id}  ->  agentundo restore ${g.id}`));
   console.log(c('2', 'FILES = files changed since the previous snapshot. Restore with: agentundo restore <id>'));

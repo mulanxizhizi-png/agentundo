@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync, spawnSync } = require('child_process');
-const { isDangerous } = require('./danger');
+const { analyze, redact, touchesFiles } = require('./danger');
 
 const MB = 1024 * 1024;
 const DEFAULTS = { maxFileMB: 50, maxTotalMB: 2048, keepMin: 20, includeEnv: false };
@@ -126,7 +126,7 @@ class Store {
   state() { try { return JSON.parse(fs.readFileSync(this.stateFile, 'utf8')); } catch { return { nextId: 1, turn: 0, turns: {} }; } }
   saveState(s) { const tmp = this.stateFile + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(s)); fs.renameSync(tmp, this.stateFile); }
   logError(msg) {
-    try { fs.mkdirSync(this.dir, { recursive: true }); fs.appendFileSync(this.errorsFile, `${new Date().toISOString()} ${msg}\n`); } catch {}
+    try { fs.mkdirSync(this.dir, { recursive: true }); fs.appendFileSync(this.errorsFile, `${new Date().toISOString()} ${redact(msg)}\n`); } catch {}
   }
   lastError() { try { const l = fs.readFileSync(this.errorsFile, 'utf8').trim().split('\n'); return l[l.length - 1] || null; } catch { return null; } }
 
@@ -200,7 +200,12 @@ class Store {
       const command0 = label.command ? String(label.command) : '';
       // Unchanged tree: skip, except the first command of a new turn or a dangerous command, so
       // `list` always shows "before <that command>" (an extra entry costs only a tiny commit).
-      const keepAnyway = !!last && label.event === 'tool' && (isDangerous(command0) || last.turn !== turn);
+      // Dangerous commands always get their own dedicated snapshot, even when nothing changed.
+      const danger = command0 ? analyze(command0) : { dangerous: false, reasons: [], remote: [] };
+      // Also kept: the first command of every turn (even right after the turn-start snapshot — v0.1.1 merged
+      // them, so Codex's first `rm a.txt` had no "before rm a.txt" entry) and any file-removing command.
+      const firstStepOfTurn = !((s.steps && s.steps[turn]) > 0);
+      const keepAnyway = !!last && label.event === 'tool' && (danger.dangerous || danger.remote.length > 0 || last.turn !== turn || firstStepOfTurn || touchesFiles(command0));
       if (!force && last && last.tree === tree && !keepAnyway) {
         this.saveState(s);
         return { snap: last, created: false, warnings };
@@ -209,11 +214,13 @@ class Store {
       s.nextId = id + 1;
       const step = (s.steps && s.steps[turn]) || 0;
       s.steps = { [turn]: label.event === 'tool' ? step + 1 : step };
-      const command = label.command ? String(label.command).replace(/\s+/g, ' ').trim().slice(0, 200) : null;
+      // Secrets (DB passwords, *_PASSWORD=..., tokens) are redacted before anything is stored.
+      const command = label.command ? redact(String(label.command)).replace(/\s+/g, ' ').trim().slice(0, 200) : null;
       const m = {
         id, tree, ts: new Date().toISOString(), turn, step: label.event === 'tool' ? step + 1 : 0,
         event: label.event || 'manual', agent: label.agent || null, session: label.session || null,
-        tool: label.tool || null, command, dangerous: command ? isDangerous(command) : false,
+        tool: label.tool || null, command, dangerous: danger.dangerous,
+        reasons: danger.reasons.length ? danger.reasons : undefined, remoteDb: danger.remote.length ? danger.remote.map(redact) : undefined,
         skipped: skipped.map((x) => x.path), note: label.note || null,
       };
       const commit = this.git(['commit-tree', tree, '-m', `agentundo #${id}`]).trim();

@@ -36,7 +36,7 @@ This installs hooks for both agents (`--agent codex` or `--agent claude` for one
 ## Commands
 
 ```
-agentundo list [--limit 20 | --all]          snapshots: id, turn, the command it preceded, ⚠ for dangerous ones
+agentundo list [--limit 20 | --all] [--dangerous]   snapshots: id, turn, the command it preceded, ⚠ + reason for dangerous ones
 agentundo diff <id> [--patch] [-- <paths>]   what changed between that snapshot and now
 agentundo restore <id> [--dry-run] [--yes] [-- <paths>]
 agentundo snap [note] [--json]               take a snapshot by hand
@@ -54,6 +54,19 @@ agentundo uninstall [--global] [--purge] [--yes]
 - Answering `n` at the prompt cancels the restore and exits with code 1.
 - restore lists what it will write and remove and asks first. Without a terminal it refuses unless you pass `--yes`.
 - Files are written to a temp folder and renamed into place one by one. If a restore is interrupted (Ctrl+C, crash), agentundo remembers it: re-run the same `restore` to finish, or restore the pre-restore snapshot to go back.
+
+## Dangerous-command alerts (v0.1.2)
+
+agentundo only **notifies**; it never blocks a command.
+
+- **Dedicated snapshot.** Before a dangerous command the hook always takes its own snapshot, even if no file changed since the previous one, and `list` marks it `⚠ dangerous (<reason>)`. `agentundo list --dangerous` shows only those. The first command of every turn and every file-removing command (`rm`, `mv`, `unlink`, ...) also always get their own `before …` entry.
+- **What counts as dangerous:** `rm -r`/`-rf`/`-fr`/`-r -f`/`--recursive [--force]`, `rimraf`, `find -delete`, `find -exec rm`, `git reset --hard`, `git clean -f…` (`-fd`, `-fdx`, `-xdf`), `git checkout -- <path>` / `git checkout .`, `git restore <path>` (not `--staged` only), `git stash drop|clear`, `git push --force`, `git branch -D`, `mkfs`, `dd of=`, `shred`, `prisma migrate reset`, apply_patch file deletions; and, when a database client runs (`psql`, `mysql`, `sqlite3`, `mongosh`, `redis-cli`, ...), `DROP TABLE|DATABASE|SCHEMA`, `TRUNCATE`, `DELETE FROM`, `dropDatabase()`, `FLUSHALL` (case-insensitive, including inside `psql -c`, `mysql -e`, `sqlite3 db "…"` and `echo … | psql`).
+- **What does not:** the command is parsed like a shell would (quotes, `;`, `&&`, `|`, `$( )`), and only the program actually run is checked, after skipping `sudo`, `env`, `VAR=x`, `xargs`, `timeout` etc. `bash -c '…'`/`sh -c` are analysed recursively. So `echo rm -rf x`, `grep "git reset --hard" notes`, `git commit -m "drop table"` are not flagged, and SQL keywords are ignored unless a database client runs.
+- **Remote databases.** If a write (or destructive SQL, a `-f file.sql`/`< dump.sql` input, or a migration tool) targets a non-local host — `postgres://`, `postgresql://`, `mysql://`, `mongodb(+srv)://`, `redis://` URIs, `psql/mysql -h <host>`, `PGHOST=…`, inline `DATABASE_URL=…` — the user sees:
+  `⚠ agentundo: this step touches a remote database (<host>) — local snapshots cannot undo it.`
+  `localhost`, `127.x`, `::1`, empty hosts and unix sockets (`host=/var/run/…`) count as local. Read-only queries (`SELECT`, `\dt`) against a remote host do not warn.
+- **How it is shown.** Claude Code and Codex: the PreToolUse hook prints `{"systemMessage": …}` and exits 0 (no decision field, so the command always runs). Claude Code shows it as a hook message; the Codex TUI shows it as `↳ Hook · …`. `codex exec` (non-interactive) does not print hook messages. Any error in the hook fails open.
+- **Secrets.** Passwords in connection strings (`u:***@`), `*_PASSWORD=`/`*_TOKEN=`/`*_API_KEY=` assignments, `--password=…`, `mysql -p<pw>` and `redis-cli -a <pw>` are redacted before anything is stored, listed, logged or shown. (The agent's own UI may still display the raw command it ran.)
 
 ## How it works
 

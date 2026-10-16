@@ -1,6 +1,6 @@
 {
   "name": "agentundo",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "An undo button for coding agents: snapshots your project before every command Codex or Claude Code runs (including rm, mv and untracked files), so one command takes you back.",
   "bin": { "agentundo": "bin/agentundo.js" },
   "files": ["bin/", "src/", "README.md", "LICENSE"],
