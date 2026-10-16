@@ -10,5 +10,6 @@
   "repository": { "type": "git", "url": "git+https://github.com/mulanxizhizi-png/agentundo.git" },
   "keywords": ["codex", "claude-code", "coding-agent", "ai-agent", "hooks", "undo", "snapshot", "checkpoint", "rewind", "cli"],
   "author": "Zjing (https://github.com/mulanxizhizi-png)",
+  "homepage": "https://agentundo.netlify.app",
   "bugs": { "url": "https://github.com/mulanxizhizi-png/agentundo/issues" }
 }
