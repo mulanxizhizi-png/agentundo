@@ -4,7 +4,7 @@
   "description": "An undo button for coding agents: snapshots your project before every command Codex or Claude Code runs (including rm, mv and untracked files), so one command takes you back.",
   "bin": { "agentundo": "bin/agentundo.js" },
   "files": ["bin/", "src/", "README.md", "LICENSE"],
-  "scripts": { "test": "node --test test/*.test.js" },
+  "scripts": { "test": "node scripts/test.js" },
   "engines": { "node": ">=20" },
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/mulanxizhizi-png/agentundo.git" },
