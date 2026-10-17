@@ -90,3 +90,78 @@ test('macOS: legacy store keyed by differently-cased path is migrated', { skip: 
   assert.ok(fs.existsSync(path.join(nw, 'shadow.git', 'HEAD')) && !fs.existsSync(old));
   assert.deepStrictEqual(reg(env), [d]);
 });
+
+// chmod-based tests: root ignores directory write permissions, so they would not reproduce anything there.
+const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+const noChmod = asRoot && 'running as root: root ignores permissions, so a read-only dir cannot be simulated';
+
+test('legacy store: stores dir not writable -> registry entry kept, old store still used, snapshots reachable', { skip: noChmod }, () => {
+  const { d, l } = symlinked();
+  const { env, before, nw, old } = legacySetup(d, l);
+  const stores = path.join(env.AGENTUNDO_HOME, 'stores');
+  fs.chmodSync(stores, 0o555);
+  try {
+    const r = run(env, d, ['list', '--all']);
+    assert.strictEqual(r.code, 0, r.out);
+    assert.doesNotMatch(r.out, /no snapshots/);
+    assert.deepStrictEqual(ids(env, d), before, 'old snapshots still listed');
+    assert.strictEqual((r.out.match(/could not move the older snapshot store/g) || []).length, 1, 'one-line note, once');
+    assert.deepStrictEqual(reg(env), [l], 'registry entry NOT rewritten while the move is impossible');
+    assert.ok(fs.existsSync(path.join(old, 'shadow.git', 'HEAD')) && !fs.existsSync(nw));
+    // still works for status, new snapshots and restore, all inside the old dir
+    assert.match(run(env, d, ['status']).out, /hooks active/);
+    fs.writeFileSync(path.join(d, 'a.txt'), 'v2'); assert.strictEqual(bash(env, d, 'rm -rf a.txt').code, 0);
+    const now = ids(env, d);
+    assert.ok(now.length > before.length, 'new snapshot recorded in the old store');
+    const rr = run(env, d, ['restore', String(before[before.length - 1]), '--yes']);
+    assert.strictEqual(rr.code, 0, rr.out);
+    assert.strictEqual(fs.readFileSync(path.join(d, 'a.txt'), 'utf8'), 'v1');
+    assert.deepStrictEqual(reg(env), [l]);
+  } finally { fs.chmodSync(stores, 0o755); }
+  // once writable again, the next command migrates it and only then re-keys the registry
+  assert.ok(ids(env, d).length > before.length);
+  assert.ok(fs.existsSync(path.join(nw, 'shadow.git', 'HEAD')) && !fs.existsSync(old));
+  assert.deepStrictEqual(reg(env), [d]);
+});
+
+test('uninstall --global --purge also removes orphaned legacy and superseded store dirs, nothing outside', () => {
+  const { d, l } = symlinked();
+  const { env, old, nw } = legacySetup(d, l);
+  fs.cpSync(old, nw, { recursive: true }); // canonical store exists too -> legacy one gets marked superseded
+  run(env, d, ['list']);
+  assert.ok(fs.existsSync(path.join(old, 'superseded-by-new-store.txt')));
+  const stores = path.join(env.AGENTUNDO_HOME, 'stores');
+  const orphan = path.join(stores, 'abcdef0123456789'); // a store nobody references any more
+  fs.mkdirSync(path.join(orphan, 'shadow.git'), { recursive: true });
+  fs.writeFileSync(path.join(orphan, 'project.json'), JSON.stringify({ root: '/no/such/project' }));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'au-outside-'));
+  fs.writeFileSync(path.join(outside, 'keep.txt'), 'keep');
+  const linked = path.join(stores, '0123456789abcdef'); fs.symlinkSync(outside, linked); // must be unlinked, not followed
+  fs.writeFileSync(path.join(stores, 'not-a-store.txt'), 'x');
+  const r = run(env, d, ['uninstall', '--global', '--purge', '--yes']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /older superseded store/);
+  assert.match(r.out, /orphaned store/);
+  for (const x of [old, nw, orphan, linked]) assert.ok(!fs.existsSync(x), `${x} removed`);
+  assert.strictEqual(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'keep', 'symlink target untouched');
+  assert.ok(fs.existsSync(path.join(stores, 'not-a-store.txt')), 'unknown files left alone');
+});
+
+test('uninstall --purge: a store that cannot be deleted is reported and exits non-zero', { skip: noChmod }, () => {
+  const { d, l } = symlinked();
+  const { env, old, nw } = legacySetup(d, l);
+  fs.cpSync(old, nw, { recursive: true });
+  run(env, d, ['list']);
+  const stores = path.join(env.AGENTUNDO_HOME, 'stores');
+  fs.chmodSync(stores, 0o555);
+  let r;
+  try { r = run(env, d, ['uninstall', '--global', '--purge', '--yes']); } finally { fs.chmodSync(stores, 0o755); }
+  assert.notStrictEqual(r.code, 0, r.out);
+  assert.match(r.out, /could not delete 2 snapshot store/);
+  assert.ok(r.out.includes(old) && r.out.includes(nw));
+  for (const x of [old, nw]) assert.ok(fs.existsSync(path.join(x, 'shadow.git', 'HEAD')), `${x} left intact, not half-deleted`);
+  // fixing permissions and re-running cleans up, even though the registry is already empty
+  const r2 = run(env, os.tmpdir(), ['uninstall', '--global', '--purge', '--yes']);
+  assert.strictEqual(r2.code, 0, r2.out);
+  assert.ok(!fs.existsSync(old) && !fs.existsSync(nw));
+});

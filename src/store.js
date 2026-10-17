@@ -49,6 +49,12 @@ function warnOnce(dir, msg) {
   try { fs.writeFileSync(marker, msg + '\n'); } catch {}
   process.stderr.write(`agentundo: ${msg}\n`);
 }
+const moveWarned = new Set();
+function moveFailedOnce(old, dir, e) {
+  if (moveWarned.has(old)) return;
+  moveWarned.add(old);
+  process.stderr.write(`agentundo: note: could not move the older snapshot store ${old} to ${dir} (${(e && e.code) || 'error'}); still using it where it is, all snapshots stay available.\n`);
+}
 // Returns the store dir to use for `root`, migrating a legacy store dir if needed.
 function migrateStore(root, env = process.env, extra = []) {
   const canon = realRoot(root);
@@ -61,12 +67,43 @@ function migrateStore(root, env = process.env, extra = []) {
       try {
         fs.renameSync(old, dir);
         try { fs.writeFileSync(path.join(dir, 'project.json'), JSON.stringify({ root: canon, migratedFrom: k }, null, 2) + '\n'); } catch {}
-      } catch { return old; } // could not move it: keep using the old dir as-is, no data loss
+      } catch (e) { // could not move it: keep using the old dir as-is, no data loss
+        moveFailedOnce(old, dir, e);
+        return old;
+      }
     } else {
       warnOnce(old, `found an older snapshot store for ${canon} (keyed as ${k}) at ${old}; it was kept untouched and the newer store ${dir} is used.`);
     }
   }
   return dir;
+}
+
+// ---- all store dirs inside agentundo's own data dir (used by `uninstall --purge`) ----
+function storesDir(env = process.env) { return path.join(homeDir(env), 'stores'); }
+const STORE_NAME = /^[0-9a-f]{16}(\.deleting-\d+)?$/; // .deleting-<pid>: an interrupted purge
+// Every entry of <home>/stores that looks like a store dir (16 hex chars, or one a purge was deleting), as absolute paths.
+// Never follows a symlinked entry out of the stores dir: callers lstat before deleting.
+function allStoreDirs(env = process.env) {
+  let names = [];
+  try { names = fs.readdirSync(storesDir(env)); } catch { return []; }
+  return names.filter((n) => STORE_NAME.test(n)).map((n) => path.join(storesDir(env), n));
+}
+function storeInfo(dir) {
+  const info = { root: null, superseded: fs.existsSync(path.join(dir, 'superseded-by-new-store.txt')), snapshots: 0 };
+  try { info.root = JSON.parse(fs.readFileSync(path.join(dir, 'project.json'), 'utf8')).root || null; } catch {}
+  try { info.snapshots = fs.readFileSync(path.join(dir, 'meta.jsonl'), 'utf8').split('\n').filter((l) => l.trim()).length; } catch {}
+  return info;
+}
+// Other store dirs that belong to the project at `root` (legacy keys, superseded copies), excluding `except`.
+function relatedStoreDirs(root, env = process.env, except = []) {
+  const canon = realRoot(root);
+  const keyed = new Set(legacyKeys(root, env).map((k) => storeDirFor(k, env)));
+  return allStoreDirs(env).filter((d) => {
+    if (except.includes(d) || d === storeDirFor(canon, env)) return false;
+    if (keyed.has(d)) return true;
+    const r = storeInfo(d).root;
+    return !!r && (r === canon || (fs.existsSync(r) && realRoot(r) === canon));
+  });
 }
 
 function readConfig(root) {
@@ -397,4 +434,4 @@ class Store {
   }
 }
 
-module.exports = { Store, homeDir, storeDir, storeDirFor, realRoot, legacyRoot, migrateStore, sameDir, DEFAULTS, DEFAULT_EXCLUDES, MB };
+module.exports = { Store, homeDir, storeDir, storeDirFor, storesDir, allStoreDirs, storeInfo, relatedStoreDirs, realRoot, legacyRoot, migrateStore, sameDir, DEFAULTS, DEFAULT_EXCLUDES, MB };

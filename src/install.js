@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { homeDir, realRoot, migrateStore } = require('./store');
+const { homeDir, realRoot, migrateStore, storeDirFor } = require('./store');
 
 const PKG_ROOT = path.resolve(__dirname, '..');
 const VERSION = require('../package.json').version;
@@ -144,6 +144,9 @@ function readRawRegistry(env = process.env) {
   try { const r = JSON.parse(fs.readFileSync(registryPath(env), 'utf8')); return Array.isArray(r.projects) ? r.projects : []; } catch { return []; }
 }
 // Re-keys legacy (pre-0.1.3) entries to the canonical path, moving their store dir first so no snapshot is lost.
+// Callers always get canonical paths. An entry is only rewritten on disk once its store actually lives under the
+// canonical key: if the move failed (e.g. ~/.agentundo/stores not writable), the old entry is kept so the old
+// store stays findable (Store() locates it through the registry) and the move is retried next time.
 function readRegistry(env = process.env) {
   const raw = readRawRegistry(env);
   let changed = false;
@@ -151,15 +154,25 @@ function readRegistry(env = process.env) {
     if (!fs.existsSync(e)) return e;
     const c = realRoot(e);
     if (c === e) return e;
-    migrateStore(c, env, [e]);
-    changed = true;
+    const dir = migrateStore(c, env, [e]);
+    if (dir === storeDirFor(c, env)) changed = true;
     return c;
   });
   if (changed) { try { writeRegistry(out, env); } catch {} }
   return [...new Set(out)];
 }
+// On-disk form of a canonical entry: keep the legacy spelling while its store has not been moved yet.
+function onDiskEntry(p, raw, env) {
+  if (fs.existsSync(storeDirFor(p, env))) return p;
+  for (const e of raw) {
+    if (e === p || !fs.existsSync(e) || realRoot(e) !== p) continue;
+    if (fs.existsSync(storeDirFor(e, env))) return e;
+  }
+  return p;
+}
 function writeRegistry(list, env = process.env) {
-  const p = [...new Set(list)].sort();
+  const raw = readRawRegistry(env);
+  const p = [...new Set([...new Set(list)].map((x) => onDiskEntry(x, raw, env)))].sort();
   if (!p.length) { fs.rmSync(registryPath(env), { force: true }); return; }
   fs.mkdirSync(homeDir(env), { recursive: true });
   const tmp = registryPath(env) + '.tmp';

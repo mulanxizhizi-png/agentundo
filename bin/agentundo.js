@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const { execFileSync } = require('child_process');
-const { Store, homeDir, MB } = require('../src/store');
+const { Store, homeDir, MB, storesDir, allStoreDirs, storeInfo, relatedStoreDirs } = require('../src/store');
 const I = require('../src/install');
 const { restore, planRestore } = require('../src/restore');
 
@@ -244,14 +244,41 @@ async function uninstall() {
   const targets = global ? [...new Set([...reg, ...(reg.includes(here) ? [] : [])])] : [here];
   const missing = targets.filter((p) => !fs.existsSync(p));
   for (const p of missing) console.error(c('33', `warning: registered project ${p} no longer exists; skipping its project files (hooks/exclude), cleaning up agentundo's own data only`));
+  // Extra store dirs --purge also removes: older/legacy copies of the targets' stores (e.g. marked superseded)
+  // and, with --global, every other store dir left in agentundo's own stores dir (orphans). Only entries of
+  // <home>/stores named like a store (16 hex chars) are ever considered; nothing outside it is touched.
+  let extras = [];
   if (purge) {
+    const own = targets.map((p) => new Store(p).dir);
+    const set = new Set();
+    for (const p of targets) for (const d of relatedStoreDirs(p, process.env, own)) set.add(d);
+    if (global) for (const d of allStoreDirs()) if (!own.includes(d)) set.add(d);
+    extras = [...set].sort();
     const stores = targets.map((p) => new Store(p)).filter((s) => s.exists());
-    if (stores.length) {
+    if (stores.length || extras.length) {
       console.log('--purge will permanently delete the snapshots of:');
       for (const s of stores) console.log(`  ${s.root} (${s.meta().length} snapshots, ${(s.sizeBytes() / MB).toFixed(1)}MB)`);
+      for (const d of extras) { const i = storeInfo(d); console.log(`  ${i.superseded ? 'older superseded' : 'orphaned'} store ${d}${i.root ? ` (was ${i.root})` : ''} (${i.snapshots} snapshots)`); }
       if (!(await confirm('Delete these snapshots? [y/N] '))) { console.log('Cancelled, nothing changed.'); process.exitCode = 1; return; }
     }
   }
+  const failed = [];
+  // Removes a store dir that must sit directly inside <home>/stores. A symlinked entry is unlinked, never followed.
+  const removeStoreDir = (d) => {
+    if (path.dirname(d) !== storesDir()) { failed.push(`${d}: not inside ${storesDir()}, refusing to delete`); return false; }
+    try {
+      const st = fs.lstatSync(d);
+      if (st.isSymbolicLink()) fs.unlinkSync(d);
+      else {
+        // Rename first: if the stores dir is not writable this fails before anything inside is deleted.
+        const gone = /\.deleting-\d+$/.test(d) ? d : `${d}.deleting-${process.pid}`;
+        if (gone !== d) fs.renameSync(d, gone);
+        fs.rmSync(gone, { recursive: true, force: true });
+      }
+    } catch (e) { if (e.code !== 'ENOENT') { failed.push(`${d}: ${e.code || e.message}`); return false; } }
+    if (fs.existsSync(d)) { failed.push(`${d}: still exists after delete`); return false; }
+    return true;
+  };
   const summary = [];
   let remaining = reg;
   for (const root of targets) {
@@ -263,12 +290,18 @@ async function uninstall() {
     if (!missing.includes(root)) try { if (I.removeExcludes(root)) res.deleted.push('.git/info/exclude block'); } catch {}
     const s = new Store(root);
     if (s.exists() || fs.existsSync(s.dir)) {
-      if (purge) { fs.rmSync(s.dir, { recursive: true, force: true }); res.deleted.push(`snapshots (${s.dir})`); }
+      if (purge) { if (removeStoreDir(s.dir)) res.deleted.push(`snapshots (${s.dir})`); else res.kept.push(`snapshots in ${s.dir} (could not delete, see below)`); }
       else res.kept.push(`snapshots in ${s.dir} (restore still works: agentundo restore <id>; delete with --purge)`);
     }
     remaining = I.unregisterProject(root);
     summary.push(res);
   }
+  if (extras.length) {
+    const res = { root: '(older/orphaned snapshot stores)', deleted: [], kept: [] };
+    for (const d of extras) { if (removeStoreDir(d)) res.deleted.push(d); else res.kept.push(`${d} (could not delete, see below)`); }
+    summary.push(res);
+  }
+  if (purge) { try { fs.rmdirSync(storesDir()); } catch {} } // only if now empty
   if (!remaining.length) {
     try { const f = I.uninstallHook({ agent: 'codex', root: here }); if (f) summary.push({ root: '(global)', deleted: [`Codex hooks in ${f}`], kept: [] }); } catch (e) { summary.push({ root: '(global)', deleted: [], kept: [e.message] }); }
     I.removeRuntime();
@@ -282,6 +315,12 @@ async function uninstall() {
     if (!r.deleted.length && !r.kept.length) console.log('  nothing to remove');
   }
   if (missing.length) console.log(`done, with ${missing.length} missing project(s) skipped (see warnings above)`);
+  if (failed.length) {
+    console.error(c('31', `agentundo: --purge could not delete ${failed.length} snapshot store(s):`));
+    for (const f of failed) console.error(`  ${f}`);
+    console.error(`Fix the permissions (e.g. chmod u+w ${storesDir()}) and re-run \`agentundo uninstall${global ? ' --global' : ''} --purge\`.`);
+    process.exitCode = 1;
+  }
 }
 
 main().catch((e) => die(e.message));
