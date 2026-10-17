@@ -1,0 +1,15 @@
+{
+  "_comment": "Real Codex CLI 0.163.0 PreToolUse payload captured 2026-10-17 (codex exec, model gpt-6.1-sol). Redacted: ids, cwd and paths.",
+  "session_id": "00000000-0000-7000-8000-000000000001",
+  "turn_id": "00000000-0000-7000-8000-000000000002",
+  "transcript_path": null,
+  "cwd": "/home/user/project",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-6.1-sol",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "apply_patch",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Update File: /home/user/project/README.md\n@@\n-line a\n+line b\n*** End Patch"
+  },
+  "tool_use_id": "exec-00000000-0000-4000-8000-000000000004"
+}

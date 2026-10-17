@@ -15,6 +15,7 @@ const DEFAULT_EXCLUDES = ['node_modules/', '.venv/', 'venv/', '__pycache__/', 'd
 const ENV_EXCLUDES = ['.env', '.env.*', '!.env.example', '!.env.sample'];
 const DB_RE = /\.(sqlite3?|db)(-wal|-shm|-journal)?$/i;
 
+function sameSet(a, b) { if (a.length !== b.length) return false; const s = new Set(a); return b.every((x) => s.has(x)); }
 function homeDir(env = process.env) { return env.AGENTUNDO_HOME || path.join(os.homedir(), '.agentundo'); }
 function realRoot(root) { try { return fs.realpathSync.native(root); } catch { return path.resolve(root); } }
 function storeDirFor(key, env = process.env) {
@@ -250,7 +251,9 @@ class Store {
     this.git(['add', '-A', '--ignore-errors', '--pathspec-from-file=-', '--pathspec-file-nul'], { input: spec, allowFail: true });
     const dbs = ignoredDbs.filter((p) => !big.has(p));
     if (dbs.length) this.git(['add', '-f', '--ignore-errors', '--pathspec-from-file=-', '--pathspec-file-nul'], { input: dbs.join('\0') + '\0', allowFail: true });
-    if (big.size) this.git(['rm', '-q', '--cached', '--ignore-unmatch', '--pathspec-from-file=-', '--pathspec-file-nul'], { input: [...big].join('\0') + '\0', allowFail: true });
+    // -f: without it git refuses ("staged content different from both the file and the HEAD") whenever the
+    // file was captured small before and has since grown, which silently left the stale small copy in the tree.
+    if (big.size) this.git(['rm', '-q', '--cached', '-f', '--ignore-unmatch', '--pathspec-from-file=-', '--pathspec-file-nul'], { input: [...big].join('\0') + '\0', allowFail: true });
     const tree = this.git(['write-tree']).trim();
     return { tree, skipped };
   }
@@ -292,7 +295,11 @@ class Store {
       // them, so Codex's first `rm a.txt` had no "before rm a.txt" entry) and any file-removing command.
       const firstStepOfTurn = !((s.steps && s.steps[turn]) > 0);
       const keepAnyway = !!last && label.event === 'tool' && (danger.dangerous || danger.remote.length > 0 || last.turn !== turn || firstStepOfTurn || touchesFiles(command0));
-      if (!force && last && last.tree === tree && !keepAnyway) {
+      // Same tree is only "nothing changed" if the same files were left out for size: a file that newly went
+      // over the cap (or came back under it) changes what the snapshot covers, so it gets its own record and
+      // restore knows the file existed. (0.1.3 and earlier reused the old record and lost that fact.)
+      const sameSkipped = !!last && sameSet(last.skipped || [], skipped.map((x) => x.path));
+      if (!force && last && last.tree === tree && sameSkipped && !keepAnyway) {
         this.saveState(s);
         return { snap: last, created: false, warnings };
       }
@@ -413,7 +420,10 @@ class Store {
       if (r.status !== 0 && r.status !== 1) throw new Error(`git check-ignore failed: ${String(r.stderr).trim() || r.signal || r.status}`);
       const ignored = new Set(String(r.stdout).split('\0').filter(Boolean));
       const cap = this.cfg.maxFileMB * MB;
+      // Never delete a path that was too big to save at the target or at any later snapshot: the store
+      // never had its content, so it can't tell whether the file belongs in the target state.
       const skippedThen = new Set(target.skipped || []);
+      for (const m of this.meta()) if (m.id >= target.id && Array.isArray(m.skipped)) for (const x of m.skipped) skippedThen.add(x);
       return paths.filter((p) => {
         if (skippedThen.has(p)) return false;
         if (ignored.has(p)) return DB_RE.test(p) && !this.defaultExcluded(p); // databases are force-included

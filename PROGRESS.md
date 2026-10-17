@@ -1,5 +1,12 @@
 # agentundo 进度
 
+## 未发布（2026-10-17）：修 Codex 验收发现的 AU-001、AU-002
+- AU-001（会误删文件）：只新增一个超大文件时，`snap` 判断「没变化」直接复用旧记录，没记下这个文件被跳过；之后文件变小再恢复，就会被当成多出来的文件删掉。现在「被跳过的文件」变了也算新快照；恢复时，目标快照或它之后任何一张快照里被跳过过的文件都不删。
+- 顺带修复同类问题：文件先被正常存过、后来变大超限时，`git rm --cached` 会报错（没加 `-f`）且被吞掉，快照里留着旧的小版本；恢复那张快照会用旧内容盖掉没存过的大文件。现在加了 `-f`，恢复时也不会写回目标快照标记为跳过的文件。
+- AU-002：钩子读取命令时兼容 `tool_input.cmd`（exec_command）、`command` 为字符串或数组、apply_patch 的 `tool_input.input`、以及 `tool_input` 直接是字符串（含 JSON 字符串）。在 box 上用真实 Codex 0.163.0 抓了两条 PreToolUse 数据（shell 和 apply_patch），脱敏后放在 `test/fixtures/`。真实格式是 `tool_name: "Bash"` / `"apply_patch"`，参数都在 `tool_input.command` 里。
+- `restore --dry-run` 和「没事可做」时也会列出保留下来的文件。
+- 只读目录下错误日志写不进去（AU-003）这次没修。
+
 ## v0.1.3（2026-10-16 晚）：项目目录被删时提示改温和
 - 已登记的项目目录被删后，钩子不再报「snapshot FAILED」，改为提示「agentundo: project directory no longer exists, skipped snapshot」。退出码仍是 0，不会拦截 agent。
 - 查了其他会输出 FAILED 的地方：只剩快照真正出错（比如快照仓库损坏）时的提示，这种情况确实没法撤销，保留原样。卸载时的提示本来就是「no longer exists」，没改。

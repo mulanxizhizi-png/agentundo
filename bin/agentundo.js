@@ -159,9 +159,9 @@ async function doRestore() {
   console.log(`  ${plan.write.length} file(s) to write back, ${plan.remove.length} file(s) to remove`);
   show(plan.write, c('32', '+/~')); show(plan.remove, c('31', '  -'));
   if (m.skipped && m.skipped.length) console.log(c('33', `  note: not in this snapshot (over size cap): ${m.skipped.join(', ')}`));
+  if (plan.keptUncaptured.length) console.log(c('2', `  kept (not captured by that snapshot: ignored/excluded/too big): ${plan.keptUncaptured.slice(0, 5).join(', ')}${plan.keptUncaptured.length > 5 ? ', …' : ''}`));
   if (!plan.write.length && !plan.remove.length && !fs.existsSync(s.journal)) return console.log('Nothing to do: the working tree already matches.');
   if (flag('--dry-run')) return console.log('(dry run, nothing changed)');
-  if (plan.keptUncaptured.length) console.log(c('2', `  kept (not captured by that snapshot: ignored/excluded/too big): ${plan.keptUncaptured.slice(0, 5).join(', ')}${plan.keptUncaptured.length > 5 ? ', …' : ''}`));
   if (movedFlags.length) console.log(c('2', `  note: treating ${movedFlags.join(' ')} after -- as option(s), not paths`));
   if (!(await confirm('Proceed? Your current state is snapshotted first, so this can be undone. [y/N] '))) { console.log('Cancelled, nothing changed.'); process.exitCode = 1; return; }
   let r;

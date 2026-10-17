@@ -10,19 +10,42 @@ const { cannotUndo, analyze, remoteWarning, redact } = require('./danger');
 
 const READ_ONLY = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'TodoWrite', 'TodoRead', 'Task', 'Agent', 'ExitPlanMode', 'BashOutput', 'KillShell', 'NotebookRead', 'ListMcpResourcesTool', 'ReadMcpResourceTool', 'view_image', 'update_plan', 'web_search']);
 
-function describe(tool, input) {
-  input = input || {};
-  if (typeof input.command === 'string') {
-    if (/^\*\*\* Begin Patch/.test(input.command) || tool === 'apply_patch') {
-      const files = [...input.command.matchAll(/^\*\*\* (Add|Update|Delete) File: (.+)$/gm)].map((m) => `${m[1].toLowerCase()} ${path.basename(m[2].trim())}`);
-      return `apply_patch: ${files.join(', ') || 'patch'}`;
-    }
-    return input.command;
-  }
-  if (Array.isArray(input.command)) {
-    const a = input.command;
-    if (a.length === 3 && /(^|\/)(ba|z|da)?sh$/.test(a[0]) && /^-l?c$/.test(a[1])) return a[2]; // ["bash","-lc","<script>"]
+const PATCH_RE = /^\s*\*\*\* Begin Patch/;
+function describePatch(text) {
+  const files = [...text.matchAll(/^\*\*\* (Add|Update|Delete) File: (.+)$/gm)].map((m) => `${m[1].toLowerCase()} ${path.basename(m[2].trim())}`);
+  return `apply_patch: ${files.join(', ') || 'patch'}`;
+}
+function describeCommand(tool, cmd) {
+  if (typeof cmd === 'string') return PATCH_RE.test(cmd) || tool === 'apply_patch' ? describePatch(cmd) : cmd;
+  if (Array.isArray(cmd)) {
+    const a = cmd.map(String);
+    if (a.length === 3 && /(^|\/)(ba|z|da)?sh$/.test(a[0]) && /^-l?c$/.test(a[1])) return describeCommand(tool, a[2]); // ["bash","-lc","<script>"]
+    if (a.length >= 2 && a[0] === 'apply_patch' && PATCH_RE.test(a[a.length - 1])) return describePatch(a[a.length - 1]);
     return a.join(' ');
+  }
+  return null;
+}
+
+// Turns a PreToolUse tool_input into the command text agentundo analyzes and stores. Accepts every
+// shape seen from Claude Code and Codex: { command: "..." } (Claude Bash, Codex shell), { command: [argv] },
+// { cmd: "..." } (Codex exec_command), { input: "*** Begin Patch..." } (Codex apply_patch), or a plain
+// string (freeform/custom tools: a patch, a command, or JSON-encoded arguments).
+function describe(tool, input) {
+  if (typeof input === 'string') {
+    const t = input.trim();
+    if (t.startsWith('{')) { try { const o = JSON.parse(t); if (o && typeof o === 'object' && !Array.isArray(o)) return describe(tool, o); } catch {} }
+    if (PATCH_RE.test(input) || tool === 'apply_patch') return describePatch(input);
+    return t ? input : tool;
+  }
+  if (Array.isArray(input)) return describeCommand(tool, input) || tool;
+  input = input && typeof input === 'object' ? input : {};
+  for (const k of ['command', 'cmd']) {
+    const d = describeCommand(tool, input[k]);
+    if (d) return d;
+  }
+  for (const k of ['input', 'patch']) {
+    const v = input[k];
+    if (typeof v === 'string' && (tool === 'apply_patch' || PATCH_RE.test(v))) return describePatch(v);
   }
   if (input.file_path || input.notebook_path) return `${tool} ${input.file_path || input.notebook_path}`;
   return tool;

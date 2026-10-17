@@ -15,10 +15,14 @@ function planRestore(store, target, paths = []) {
   // its absence from the snapshot says nothing about whether it existed.
   const remove = store.capturable(target, gone);
   const keep = new Set(remove);
+  // A path the target recorded as too big was not saved by it; any copy in its tree is stale (snapshots taken
+  // before this fix could keep an older small copy), so never write it over the current file.
+  const skippedThen = new Set(target.skipped || []);
+  const written = changes.filter((c) => c.status !== 'D').map((c) => c.path);
   return {
-    write: changes.filter((c) => c.status !== 'D').map((c) => c.path), // A/M/T: (re)create from target
+    write: written.filter((p) => !skippedThen.has(p)), // A/M/T: (re)create from target
     remove,
-    keptUncaptured: gone.filter((p) => !keep.has(p)),
+    keptUncaptured: [...gone.filter((p) => !keep.has(p)), ...written.filter((p) => skippedThen.has(p))],
     skippedNow: cur.skipped,
   };
 }
