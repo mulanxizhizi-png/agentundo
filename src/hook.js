@@ -80,7 +80,7 @@ function handle(payload, agent, env = process.env) {
     store.logError(`${event}: ${e.message}`);
     msgs.push(`agentundo: snapshot FAILED, this step is not undoable (${e.message.slice(0, 200)}). Details: agentundo status`);
   }
-  if (label.command && !a.remote.length && cannotUndo(label.command, store.root)) msgs.push(`agentundo: heads-up, this command may change things outside the project (databases, remote, other folders); a local snapshot can't undo that.`);
+  if (label.command && !a.remote.length && cannotUndo(label.command, store.root, { cwd, maxFileMB: store.cfg.maxFileMB, excluded: (p) => store.defaultExcluded(p) })) msgs.push(`agentundo: heads-up, this command may change things outside the project (databases, remote, other folders); a local snapshot can't undo that.`);
   return msgs.length ? redact(msgs.join('\n')) : null;
 }
 

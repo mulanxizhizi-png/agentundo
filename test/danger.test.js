@@ -152,3 +152,54 @@ test('deploy repro (Codex): first command of a turn gets its own entry right aft
   hook(env, d, { hook_event_name: 'PreToolUse', session_id: 'cx', turn_id: 'T1', tool_name: 'shell', tool_input: { command: 'rm b.txt' } }, 'codex');
   assert.match(run(env, d, ['list', '--all']).out, /t1\.2 .*before rm b\.txt/);
 });
+
+// v0.1.4: writes to a local SQLite file inside the project are snapshotted (restore undoes them), so they
+// no longer get the "may change things outside the project" heads-up. Everything else still does.
+test('cannotUndo: in-project SQLite files skip the heads-up; outside/over-cap/remote/mixed still warn', () => {
+  const d = tmpProject({ 'app.db': 'x', 'sub/keep.txt': '', 'node_modules/pkg/cache.db': 'x' }, { git: false });
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(require('os').tmpdir(), 'au-out-')));
+  fs.writeFileSync(path.join(outside, 'other.db'), 'x');
+  const o = { cwd: d, maxFileMB: 50, excluded: (p) => p.startsWith('node_modules/') };
+  const del = '"DELETE FROM users; VACUUM;"';
+  // local, in project: no heads-up
+  for (const c of [`sqlite3 app.db ${del}`, `sqlite3 ./app.db ${del}`, `sqlite3 ${d}/app.db ${del}`, `sqlite3 new.sqlite3 "create table t(a)"`,
+    `cd sub && sqlite3 ../app.db ${del}`, `cd ${d} && sqlite3 app.db ${del}`, `echo "delete from t;" | sqlite3 app.db`, `bash -c 'sqlite3 app.db "drop table t"'`]) {
+    assert.ok(!cannotUndo(c, d, o), c);
+  }
+  assert.ok(!cannotUndo(`sqlite3 ../app.db ${del}`, d, { ...o, cwd: path.join(d, 'sub') }), 'relative to a sub-folder cwd');
+  // still warn
+  for (const c of [`sqlite3 ${outside}/other.db ${del}`, `sqlite3 ../${path.basename(outside)}/other.db ${del}`, `sqlite3 ~/app.db ${del}`, `sqlite3 $DB ${del}`,
+    `sqlite3 node_modules/pkg/cache.db ${del}`, `cat dump.sql | sqlite3 app.db`, `sqlite3 app.db < dump.sql`, `sqlite3 -init x.sql app.db ${del}`,
+    `sqlite3 app.db "ATTACH '${outside}/other.db' AS o; DELETE FROM o.t"`, `sqlite3 app.db "DELETE FROM t" ".backup /srv/x.db"`, `sqlite3 app.db "DELETE FROM t" ".shell touch /srv/x"`,
+    `sqlite3 ${del}`, `psql -c "drop table x"`, `psql postgres://u@localhost/x -c "drop table t"`,
+    `sqlite3 app.db ${del} && psql -c "delete from u"`, `sqlite3 app.db ${del}; sqlite3 ${outside}/other.db ${del}`, `sqlite3 app.db ${del} && rm -rf ~/Documents`,
+    `(cd /elsewhere); sqlite3 app.db ${del}`, `DATABASE_URL=file:./app.db npx prisma migrate reset`]) {
+    assert.ok(cannotUndo(c, d, o), c);
+  }
+  // over the per-file cap: not snapshotted, so the heads-up stays
+  fs.writeFileSync(path.join(d, 'big.db'), Buffer.alloc(2 * 1024 * 1024));
+  assert.ok(cannotUndo(`sqlite3 big.db ${del}`, d, { ...o, maxFileMB: 1 }));
+  assert.ok(!cannotUndo(`sqlite3 big.db ${del}`, d, { ...o, maxFileMB: 50 }));
+  // without opts (old callers) relative paths resolve against the root
+  assert.ok(!cannotUndo(`sqlite3 app.db ${del}`, d));
+});
+
+test('hook: in-project SQLite DELETE gets the snapshot notice but no "outside the project" heads-up; remote/outside/over-cap still warned', () => {
+  const { env, d } = setup({ 'app.db': 'sqlite' });
+  const msg = (c) => { const out = bash(env, d, c).stdout; return out ? JSON.parse(out).systemMessage : ''; };
+  const rel = msg('sqlite3 app.db "DELETE FROM users; VACUUM;"');
+  assert.match(rel, /DELETE FROM — saved snapshot #\d+ first/); assert.doesNotMatch(rel, /heads-up/);
+  const abs = msg(`sqlite3 ${d}/app.db "DELETE FROM users"`);
+  assert.match(abs, /DELETE FROM/); assert.doesNotMatch(abs, /heads-up/);
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(require('os').tmpdir(), 'au-out-')));
+  assert.match(msg(`sqlite3 ${outside}/app.db "DELETE FROM users"`), /heads-up/);
+  assert.match(msg('sqlite3 app.db "DELETE FROM users" && sqlite3 /srv/other.db "DELETE FROM users"'), /heads-up/);
+  const pg = msg('psql postgres://u:pw@db.example.com/app -c "DELETE FROM users"');
+  assert.match(pg, /remote database \(db\.example\.com\)/); assert.doesNotMatch(pg, /pw@/);
+  assert.match(msg('psql -h remotehost -U me -c "DELETE FROM users"'), /remote database \(remotehost\)/);
+  // over the cap: file isn't snapshotted, so both the size warning and the heads-up appear
+  fs.mkdirSync(path.join(d, '.agentundo'), { recursive: true }); fs.writeFileSync(path.join(d, '.agentundo', 'config.json'), JSON.stringify({ maxFileMB: 1 }));
+  fs.writeFileSync(path.join(d, 'app.db'), Buffer.alloc(2 * 1024 * 1024));
+  const big = msg('sqlite3 app.db "DELETE FROM users"');
+  assert.match(big, /over 1MB not snapshotted: app\.db/); assert.match(big, /heads-up/);
+});

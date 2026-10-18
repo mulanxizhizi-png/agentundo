@@ -11,6 +11,9 @@
 //   so `psql -c "..."`, `mysql -e '...'`, `sqlite3 db "..."` and `echo '...' | psql` all count.
 // - Detection is a heuristic for a *notification*: it never blocks anything.
 
+const fs = require('fs');
+const path = require('path');
+
 const DB_CLIENTS = new Set(['psql', 'pg_restore', 'mysql', 'mariadb', 'sqlite3', 'sqlite', 'sqlcmd', 'duckdb', 'clickhouse-client', 'cockroach', 'mongo', 'mongosh', 'redis-cli', 'pgcli', 'mycli', 'litecli', 'usql']);
 const WRAPPERS = new Set(['sudo', 'doas', 'env', 'time', 'nice', 'nohup', 'command', 'exec', 'builtin', 'stdbuf', 'ionice', 'timeout', 'xargs', 'unbuffer', 'npx', 'bunx']);
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish']);
@@ -89,6 +92,8 @@ const SQL_DESTRUCTIVE = [
 ];
 const SQL_WRITE = /\b(insert\s+into|update\s+[\w"`.]+\s+set|delete\s+from|drop\s|truncate\s|alter\s|create\s|grant\s|revoke\s|replace\s+into|merge\s+into|copy\s+[\w"`.]+\s+from|vacuum\b|reindex\b)|\b(insert(One|Many)?|update(One|Many)?|delete(One|Many)?|replaceOne|dropDatabase|drop)\s*\(|\b(set|del|hset|lpush|rpush|sadd|zadd|expire|flushall|flushdb|rename)\s+\S/i;
 
+const MIGRATOR = /\b(prisma\s+(migrate|db\s+push)|alembic\s+(upgrade|downgrade)|rails\s+db:|rake\s+db:|knex\s+migrate|sequelize\s+db:|typeorm\s+(migration|schema)|drizzle-kit\s+(push|migrate)|flyway|liquibase|manage\.py\s+(migrate|flush))\b/;
+
 // Analyse one command text. Returns { dangerous, reasons[], remote: [hosts], dbWrite }.
 function analyze(cmd, depth = 0) {
   const text = String(cmd || '');
@@ -155,7 +160,7 @@ function analyze(cmd, depth = 0) {
   if (usesDb) for (const [re, name] of SQL_DESTRUCTIVE) { const m = re.exec(text); if (m) reasons.add(name(m)); }
   for (const u of dbUris(text)) if (!u.local) hosts.add(u.host);
   // Migration tools / ORMs pointed at a DB URI also write.
-  const migrator = /\b(prisma\s+(migrate|db\s+push)|alembic\s+(upgrade|downgrade)|rails\s+db:|rake\s+db:|knex\s+migrate|sequelize\s+db:|typeorm\s+(migration|schema)|drizzle-kit\s+(push|migrate)|flyway|liquibase|manage\.py\s+(migrate|flush))\b/.test(text);
+  const migrator = MIGRATOR.test(text);
   const dbWrite = (usesDb && (SQL_WRITE.test(text) || dbFileInput)) || migrator || [...reasons].some((r) => /DROP|TRUNCATE|DELETE FROM|FLUSH|Mongo/.test(r));
   return { dangerous: reasons.size > 0, reasons: [...reasons], remote: dbWrite ? [...hosts] : [], dbWrite };
 
@@ -220,9 +225,116 @@ function outsideProject(cmd, root) {
   });
 }
 const OUTSIDE = [/\bgit\s+push\b/, /\b(aws|gcloud|az|kubectl|terraform)\s/, /\bcurl\b.*-X\s*(DELETE|POST|PUT)/, /\bdiskutil\b/];
-// Generic heads-up (not the remote-DB warning): local DB writes, pushes, cloud CLIs, paths outside.
-function cannotUndo(cmd, root) {
-  const a = analyze(cmd);
-  return (a.dbWrite && !a.remote.length) || OUTSIDE.some((re) => re.test(cmd)) || outsideProject(cmd, root);
+
+// ---- local, in-project SQLite files (snapshotted, so restore really undoes the write) ----
+// Main database files only; same extensions as DB_RE in store.js (sidecars -wal/-shm/-journal follow the main file).
+const SQLITE_FILE_RE = /\.(sqlite3?|db)$/i;
+const SQLITE_PROGS = new Set(['sqlite3', 'sqlite']);
+// sqlite3 options that take a value (sqlite3 accepts both -opt and --opt).
+const SQLITE_VALUE_OPTS = new Set(['-cmd', '-separator', '-newline', '-nullvalue', '-vfs', '-maxsize', '-mmap', '-lookaside', '-pagecache', '-heap', '-escape']);
+// SQL / dot-commands that can write somewhere other than the main database file, or run SQL/commands
+// we can't see: ATTACH, VACUUM INTO, .open/.backup/.save/.output/.once/.clone/.shell/.system/.excel/.read,
+// and sqlite3's -init/-A/-archive options.
+const SQLITE_ESCAPES = /\battach\b|\bvacuum\b[^;]*\binto\b|(?:^|[\s;"'(])\.(open|backup|save|output|once|clone|shell|system|excel|read)\b/i;
+
+// True only when we are sure every database the command writes is a local SQLite file inside the project
+// that the next snapshot captures (not in a default-excluded folder, not over maxFileMB). Anything we
+// can't resolve (no file argument, $VAR/~ paths, unknown cwd after `cd`, SQL piped from a file, other
+// DB clients, migration tools) returns false, so the generic heads-up stays on.
+function localSqliteOnly(cmd, opts = {}) {
+  const text = String(cmd || '');
+  const root = opts.root ? path.resolve(opts.root) : null;
+  if (!root) return false;
+  if (MIGRATOR.test(text) || SQLITE_ESCAPES.test(text) || dbUris(text).length) return false;
+  let realRootDir = root; try { realRootDir = fs.realpathSync.native(root); } catch {}
+  const capBytes = (Number(opts.maxFileMB) > 0 ? Number(opts.maxFileMB) : 50) * 1024 * 1024;
+  const excluded = typeof opts.excluded === 'function' ? opts.excluded : () => false;
+  let sawSqlite = false;
+
+  const inside = (abs) => [root, realRootDir].some((r) => { const rel = path.relative(r, abs); return rel && !rel.startsWith('..') && !path.isAbsolute(rel); });
+  function resolveReal(abs) {
+    try { return fs.realpathSync.native(abs); } catch {}
+    try { return path.join(fs.realpathSync.native(path.dirname(abs)), path.basename(abs)); } catch {}
+    return abs; // parent doesn't exist either: sqlite3 can't create it there; judge the plain path
+  }
+  function fileOk(file, cwd) {
+    if (!file || !SQLITE_FILE_RE.test(file) || /[$`*?~{}]/.test(file)) return false;
+    if (!path.isAbsolute(file) && !cwd) return false;
+    const abs = path.resolve(cwd || '/', file);
+    const real = resolveReal(abs);
+    if (!inside(real)) return false;
+    const rel = path.relative(realRootDir, real).split(path.sep).join('/');
+    if (rel.startsWith('..') || excluded(rel)) return false;
+    for (const f of [real, real + '-wal', real + '-journal', real + '-shm']) {
+      try { const st = fs.statSync(f); if (st.isFile() && st.size > capBytes) return false; } catch {}
+    }
+    return true;
+  }
+  function sqliteTarget(args) {
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === '--') return args[i + 1] || null;
+      if (a.startsWith('-')) {
+        const o = a.replace(/^--/, '-').split('=')[0];
+        if (o === '-init' || o === '-A' || o === '-archive') return null;
+        if (SQLITE_VALUE_OPTS.has(o) && !a.includes('=')) i++;
+        continue;
+      }
+      return a;
+    }
+    return null; // no file: in-memory db, or something we don't understand
+  }
+  // Walk the token stream so we know the operator before each simple command (pipes) and track `cd`.
+  function walk(s, cwd, depth) {
+    let toks; try { toks = lex(s); } catch { return false; }
+    const cmds = []; let cur = []; let prevOp = null; let skip = false; let curRedir = false;
+    for (const t of toks) {
+      if (t.op) { if (cur.length) cmds.push({ words: cur, prevOp, redirIn: curRedir }); cur = []; curRedir = false; prevOp = t.op; continue; }
+      if (t.redir) { if (t.redir.includes('<')) curRedir = true; skip = true; continue; }
+      if (skip) { skip = false; continue; }
+      cur.push(t.w);
+    }
+    if (cur.length) cmds.push({ words: cur, prevOp, redirIn: curRedir });
+    if (toks.some((t) => t.op === '(' || t.op === '$(' || t.op === '`') && cmds.some((c) => ['cd', 'pushd', 'popd'].includes(unwrap(c.words).prog))) cwd = null;
+    let prevProg = null;
+    for (const c of cmds) {
+      const { prog, args } = unwrap(c.words);
+      const pipedFrom = c.prevOp === '|' ? prevProg : null;
+      prevProg = prog;
+      if (!prog) continue;
+      if (prog === 'cd' || prog === 'pushd') {
+        const dest = args.filter((x) => !x.startsWith('-') || x === '-')[0];
+        cwd = (!dest || dest === '-' || /[$`~*?{}]/.test(dest) || !cwd && !path.isAbsolute(dest)) ? null : path.resolve(cwd || '/', dest);
+        continue;
+      }
+      if (prog === 'popd') { cwd = null; continue; }
+      if (SHELLS.has(prog)) {
+        const ci = args.findIndex((x) => /^-[a-z]*c$/.test(x));
+        if (ci >= 0 && args[ci + 1] && depth < 3) { if (!walk(args[ci + 1], cwd, depth + 1)) return false; }
+        else if (args.length) return false; // `bash script.sh`, `sh < file`: can't see what runs
+        continue;
+      }
+      if (prog === 'eval') { if (depth >= 3 || !walk(args.join(' '), cwd, depth + 1)) return false; continue; }
+      if (DB_CLIENTS.has(prog)) {
+        if (!SQLITE_PROGS.has(prog)) return false;
+        if (c.redirIn) return false; // `sqlite3 app.db < file.sql`: SQL we can't see
+        if (pipedFrom && !['echo', 'printf'].includes(pipedFrom)) return false; // `cat x.sql | sqlite3 ...`
+        if (!fileOk(sqliteTarget(args), cwd)) return false;
+        sawSqlite = true;
+      }
+    }
+    return true;
+  }
+  const cwd0 = opts.cwd ? path.resolve(opts.cwd) : root;
+  return walk(text, cwd0, 0) && sawSqlite;
 }
-module.exports = { touchesFiles, analyze, isDangerous, remoteDbHosts, remoteWarning, cannotUndo, redact, dbUris, isLocalHost, lex, simpleCommands };
+
+// Generic heads-up (not the remote-DB warning): local DB writes, pushes, cloud CLIs, paths outside.
+// opts: { cwd, maxFileMB, excluded(relPath) } lets a write to an in-project SQLite file (which the snapshot
+// captures and restore undoes) skip the heads-up. Without opts the old, stricter behaviour applies.
+function cannotUndo(cmd, root, opts = {}) {
+  const a = analyze(cmd);
+  const localDb = a.dbWrite && !a.remote.length && !localSqliteOnly(cmd, { ...opts, root });
+  return localDb || OUTSIDE.some((re) => re.test(cmd)) || outsideProject(cmd, root);
+}
+module.exports = { touchesFiles, analyze, isDangerous, remoteDbHosts, remoteWarning, cannotUndo, localSqliteOnly, redact, dbUris, isLocalHost, lex, simpleCommands };
