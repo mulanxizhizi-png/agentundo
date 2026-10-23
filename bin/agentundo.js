@@ -78,7 +78,7 @@ function help() {
   console.log(`agentundo ${I.VERSION} - an undo button for coding agents (Codex, Claude Code)
 
   agentundo init [--agent codex|claude] [--claude-scope local|user]
-  agentundo list [--limit 20|--all] [--dangerous]   snapshots: id, turn, what it ran before (⚠ = dangerous)
+  agentundo list [--limit 20|--all] [--dangerous]   snapshots: id, turn, what it ran before (⚠ = dangerous / out-of-scope)
   agentundo diff <id> [--patch] [-- <paths>]   snapshot vs. working tree
   agentundo restore <id> [--dry-run] [--yes] [-- <paths>]
   agentundo snap [note]                  take a snapshot now
@@ -129,7 +129,8 @@ function list() {
     const t = m.step ? `t${m.turn}.${m.step}` : `t${m.turn}`;
     const why = [...(m.reasons || []), ...(m.remoteDb && m.remoteDb.length ? [`remote DB ${m.remoteDb.join(', ')}: not undoable`] : [])];
     const danger = m.dangerous || why.length ? c('31', ` ⚠ dangerous${why.length ? ` (${why.join('; ')})` : ''}`) : '';
-    console.log(`${String(m.id).padEnd(5)} ${t.padEnd(7)} ${ago(m.ts).padEnd(8)} ${String(m.agent || '-').padEnd(7)} ${String(m.changed == null ? '-' : m.changed).padEnd(5)}  ${m.dangerous ? c('1', label(m)) : label(m)}${danger}${m.receipt ? (m.receipt.status === 'green' ? c('32', ' ✓ tests passed') : c('31', ` ✗ tests ${m.receipt.status === 'blocked' ? 'failed (agent sent back)' : 'failed'}`)) : ''}${m.skipped && m.skipped.length ? c('33', ` (${m.skipped.length} big file(s) not saved)`) : ''}`);
+    const scope = m.outOfScope ? c('33', ' ⚠ out-of-scope') : '';
+    console.log(`${String(m.id).padEnd(5)} ${t.padEnd(7)} ${ago(m.ts).padEnd(8)} ${String(m.agent || '-').padEnd(7)} ${String(m.changed == null ? '-' : m.changed).padEnd(5)}  ${m.dangerous ? c('1', label(m)) : label(m)}${danger}${scope}${m.receipt ? (m.receipt.status === 'green' ? c('32', ' ✓ tests passed') : c('31', ` ✗ tests ${m.receipt.status === 'blocked' ? 'failed (agent sent back)' : 'failed'}`)) : ''}${m.skipped && m.skipped.length ? c('33', ` (${m.skipped.length} big file(s) not saved)`) : ''}`);
   }
   if (pool.length > rows.length) console.log(c('2', `(${pool.length - rows.length} older; --all to show)`));
   const g = s.lastGreen();

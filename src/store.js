@@ -294,7 +294,7 @@ class Store {
       // Also kept: the first command of every turn (even right after the turn-start snapshot — v0.1.1 merged
       // them, so Codex's first `rm a.txt` had no "before rm a.txt" entry) and any file-removing command.
       const firstStepOfTurn = !((s.steps && s.steps[turn]) > 0);
-      const keepAnyway = !!last && label.event === 'tool' && (danger.dangerous || danger.remote.length > 0 || last.turn !== turn || firstStepOfTurn || touchesFiles(command0));
+      const keepAnyway = !!last && label.event === 'tool' && (danger.dangerous || danger.remote.length > 0 || last.turn !== turn || firstStepOfTurn || touchesFiles(command0) || !!label.outOfScope);
       // Same tree is only "nothing changed" if the same files were left out for size: a file that newly went
       // over the cap (or came back under it) changes what the snapshot covers, so it gets its own record and
       // restore knows the file existed. (0.1.3 and earlier reused the old record and lost that fact.)
@@ -314,6 +314,9 @@ class Store {
         event: label.event || 'manual', agent: label.agent || null, session: label.session || null,
         tool: label.tool || null, command, dangerous: danger.dangerous,
         reasons: danger.reasons.length ? danger.reasons : undefined, remoteDb: danger.remote.length ? danger.remote.map(redact) : undefined,
+        outOfScope: label.outOfScope || undefined,
+        outOfScopePaths: label.outOfScope && label.outOfScopePaths && label.outOfScopePaths.length
+          ? label.outOfScopePaths.slice(0, 5) : undefined,
         skipped: skipped.map((x) => x.path), note: label.note || null,
       };
       const commit = this.git(['commit-tree', tree, '-m', `agentundo #${id}`]).trim();

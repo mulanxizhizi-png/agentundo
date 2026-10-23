@@ -73,7 +73,7 @@ agentundo only **notifies**; it never blocks a command.
 ## How it works
 
 - Snapshots live in a private git repo **outside your project**: `~/.agentundo/stores/<hash>/`. agentundo runs git with its own `GIT_DIR`, work tree, and index, so your `.git` (history, index, branches, stash) is never read or changed, and an agent running `rm -rf .` can't delete the snapshots. Projects without git work too.
-- Identical files are stored once. When nothing changed, no new snapshot is made, except that the first command of each turn and dangerous commands always get a `before …` entry.
+- Identical files are stored once. When nothing changed, no new snapshot is made, except that the first command of each turn, dangerous commands, and out-of-scope writes (when `allowPaths` is set) always get a `before …` entry.
 - Included: tracked and untracked files, symlinks, the executable bit, binaries, and SQLite databases (`*.db`, `*.sqlite`, `*.sqlite3` with `-wal`/`-shm`), even if your `.gitignore` ignores them.
 - Excluded by default: whatever your `.gitignore` ignores, plus `node_modules/ .venv/ venv/ __pycache__/ dist/ build/ target/ .next/ .nuxt/ .cache/ coverage/` and `.env` / `.env.*` (except `.env.example`).
 - Caps: files over **50MB** are skipped. You get a warning each time, and `list` shows the skipped files. Total storage is capped at **2GB**. Over the cap, the oldest snapshots are deleted (the newest 20 are always kept) and you are told **every time**. Snapshotting never stops silently.
@@ -84,6 +84,14 @@ Optional `.agentundo/config.json` in the project:
 
 ```json
 { "maxFileMB": 50, "maxTotalMB": 2048, "keepMin": 20, "includeEnv": false, "exclude": ["data/raw/"] }
+```
+
+### Scope guard (`allowPaths`)
+
+Declare which paths the agent is allowed to change. Unconfigured or `[]` = off (same as before). When set, a Write / Edit / apply_patch / file-writing Bash that touches a path outside the globs still runs, but the hook shows a warn-only `systemMessage` and `agentundo list` marks that snapshot `⚠ out-of-scope` (with `agentundo restore <id>`). Absolute paths outside the project also count as out-of-scope. This does not replace sandbox or permissions — it only reminds and tags the snapshot.
+
+```json
+{ "allowPaths": ["src/**", "tests/**"] }
 ```
 
 ## Limitations

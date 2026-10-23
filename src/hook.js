@@ -7,6 +7,7 @@ const path = require('path');
 const { Store } = require('./store');
 const { findProject } = require('./install');
 const { cannotUndo, analyze, remoteWarning, redact } = require('./danger');
+const { pathsFromTool, checkScope, scopeWarning, normalizeAllowPaths } = require('./scope');
 
 const READ_ONLY = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'TodoWrite', 'TodoRead', 'Task', 'Agent', 'ExitPlanMode', 'BashOutput', 'KillShell', 'NotebookRead', 'ListMcpResourcesTool', 'ReadMcpResourceTool', 'view_image', 'update_plan', 'web_search']);
 
@@ -66,6 +67,19 @@ function handle(payload, agent, env = process.env) {
     const tool = payload.tool_name || 'tool';
     if (READ_ONLY.has(tool)) return null;
     label = { event: 'tool', agent, session: payload.session_id, turnKey, tool, command: describe(tool, payload.tool_input) };
+    // allowPaths scope guard (default off): mark out-of-scope writes for list + warn-only message.
+    const allow = normalizeAllowPaths(store.cfg);
+    if (allow.length) {
+      try {
+        const touched = pathsFromTool(tool, payload.tool_input, label.command);
+        const scope = checkScope(touched, allow, store.root, cwd);
+        if (scope.outOfScope) {
+          label.outOfScope = true;
+          label.outOfScopePaths = scope.outOfScopePaths;
+          label.outOfScopeTotal = scope.outOfScopeTotal;
+        }
+      } catch {}
+    }
   } else return null;
   const msgs = [];
   let a = { dangerous: false, reasons: [], remote: [] };
@@ -76,6 +90,7 @@ function handle(payload, agent, env = process.env) {
     const r = store.snapshot(label);
     msgs.push(...r.warnings);
     if (a.dangerous && r.snap) msgs.push(`agentundo: ⚠ ${a.reasons.join(', ')} — saved snapshot #${r.snap.id} first. Undo: agentundo restore ${r.snap.id}`);
+    if (label.outOfScope) msgs.push(scopeWarning(label.outOfScopePaths, r.snap && r.snap.id, label.outOfScopeTotal));
   } catch (e) {
     store.logError(`${event}: ${e.message}`);
     msgs.push(`agentundo: snapshot FAILED, this step is not undoable (${e.message.slice(0, 200)}). Details: agentundo status`);
