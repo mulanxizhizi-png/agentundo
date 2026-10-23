@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync, spawnSync } = require('child_process');
-const { analyze, redact, touchesFiles } = require('./danger');
+const { analyze, redact, touchesFiles, unrestorableLocalDb } = require('./danger');
 
 const MB = 1024 * 1024;
 const DEFAULTS = { maxFileMB: 50, maxTotalMB: 2048, keepMin: 20, includeEnv: false };
@@ -121,6 +121,7 @@ function readConfig(root) {
 class Store {
   constructor(root, env = process.env) {
     this.root = realRoot(root);
+    this.env = env;
     this.dir = migrateStore(root, env);
     this.gitDir = path.join(this.dir, 'shadow.git');
     this.index = path.join(this.dir, 'index');
@@ -128,6 +129,7 @@ class Store {
     this.stateFile = path.join(this.dir, 'state.json');
     this.journal = path.join(this.dir, 'restore-journal.json');
     this.errorsFile = path.join(this.dir, 'errors.log');
+    this.errorsFallback = path.join(homeDir(env), 'errors-fallback.log');
     this.cfg = readConfig(this.root);
   }
 
@@ -212,10 +214,38 @@ class Store {
   rewriteMeta(list) { const tmp = this.metaFile + '.tmp'; fs.writeFileSync(tmp, list.map((m) => JSON.stringify(m) + '\n').join('')); fs.renameSync(tmp, this.metaFile); }
   state() { try { return JSON.parse(fs.readFileSync(this.stateFile, 'utf8')); } catch { return { nextId: 1, turn: 0, turns: {} }; } }
   saveState(s) { const tmp = this.stateFile + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(s)); fs.renameSync(tmp, this.stateFile); }
+  // AU-003: never silently drop errors. Prefer the store dir; if that is not writable, fall back to
+  // ~/.agentundo/errors-fallback.log and always tip on stderr (hook still exits 0).
   logError(msg) {
-    try { fs.mkdirSync(this.dir, { recursive: true }); fs.appendFileSync(this.errorsFile, `${new Date().toISOString()} ${redact(msg)}\n`); } catch {}
+    const line = `${new Date().toISOString()} ${redact(msg)}\n`;
+    const tryAppend = (file) => {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.appendFileSync(file, line);
+      return true;
+    };
+    try {
+      tryAppend(this.errorsFile);
+      return { wrote: this.errorsFile, fallback: false };
+    } catch (e1) {
+      try {
+        tryAppend(this.errorsFallback);
+        try { process.stderr.write(`agentundo: could not write ${this.errorsFile} (${e1.code || e1.message}); wrote to ${this.errorsFallback} instead\n`); } catch {}
+        return { wrote: this.errorsFallback, fallback: true };
+      } catch (e2) {
+        try { process.stderr.write(`agentundo: could not write error log (${e1.code || e1.message}; fallback ${e2.code || e2.message}): ${redact(msg)}\n`); } catch {}
+        return { wrote: null, fallback: false };
+      }
+    }
   }
-  lastError() { try { const l = fs.readFileSync(this.errorsFile, 'utf8').trim().split('\n'); return l[l.length - 1] || null; } catch { return null; } }
+  lastError() {
+    for (const f of [this.errorsFile, this.errorsFallback]) {
+      try {
+        const l = fs.readFileSync(f, 'utf8').trim().split('\n');
+        if (l.length && l[l.length - 1]) return l[l.length - 1];
+      } catch {}
+    }
+    return null;
+  }
 
   // Turn number for a (session, turn key). New key => new turn.
   turnFor(s, session, key, isNewTurn) {
@@ -290,11 +320,14 @@ class Store {
       // Unchanged tree: skip, except the first command of a new turn or a dangerous command, so
       // `list` always shows "before <that command>" (an extra entry costs only a tiny commit).
       // Dangerous commands always get their own dedicated snapshot, even when nothing changed.
-      const danger = command0 ? analyze(command0) : { dangerous: false, reasons: [], remote: [] };
+      const danger = command0 ? analyze(command0) : { dangerous: false, reasons: [], remote: [], dbWrite: false };
+      const dbOpts = { root: this.root, cwd: label.cwd || this.root, maxFileMB: this.cfg.maxFileMB, excluded: (p) => this.defaultExcluded(p) };
+      // Outside-project / unrestorable local DB: always keep a list row so the user sees "snapshotted / may not restore".
+      const outsideDb = !!(command0 && (label.outsideDb || unrestorableLocalDb(command0, this.root, dbOpts)));
       // Also kept: the first command of every turn (even right after the turn-start snapshot — v0.1.1 merged
       // them, so Codex's first `rm a.txt` had no "before rm a.txt" entry) and any file-removing command.
       const firstStepOfTurn = !((s.steps && s.steps[turn]) > 0);
-      const keepAnyway = !!last && label.event === 'tool' && (danger.dangerous || danger.remote.length > 0 || last.turn !== turn || firstStepOfTurn || touchesFiles(command0) || !!label.outOfScope);
+      const keepAnyway = !!last && label.event === 'tool' && (danger.dangerous || danger.remote.length > 0 || outsideDb || last.turn !== turn || firstStepOfTurn || touchesFiles(command0) || !!label.outOfScope);
       // Same tree is only "nothing changed" if the same files were left out for size: a file that newly went
       // over the cap (or came back under it) changes what the snapshot covers, so it gets its own record and
       // restore knows the file existed. (0.1.3 and earlier reused the old record and lost that fact.)
@@ -314,6 +347,7 @@ class Store {
         event: label.event || 'manual', agent: label.agent || null, session: label.session || null,
         tool: label.tool || null, command, dangerous: danger.dangerous,
         reasons: danger.reasons.length ? danger.reasons : undefined, remoteDb: danger.remote.length ? danger.remote.map(redact) : undefined,
+        outsideDb: outsideDb || undefined,
         outOfScope: label.outOfScope || undefined,
         outOfScopePaths: label.outOfScope && label.outOfScopePaths && label.outOfScopePaths.length
           ? label.outOfScopePaths.slice(0, 5) : undefined,

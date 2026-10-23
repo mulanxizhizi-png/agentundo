@@ -120,14 +120,16 @@ function list() {
   journalNotice(s);
   const all = s.metaWithMarks();
   if (flag('--json')) { const g = s.lastGreen(); return console.log(JSON.stringify({ schemaVersion: 1, root: s.root, lastGreen: g ? g.id : null, snapshots: all.map(({ tree, commit, ...m }) => ({ ...m, label: label(m) })) })); }
-  const pool = flag('--dangerous') ? all.filter((m) => m.dangerous || (m.remoteDb && m.remoteDb.length)) : all;
+  const pool = flag('--dangerous') ? all.filter((m) => m.dangerous || (m.remoteDb && m.remoteDb.length) || m.outsideDb) : all;
   const lim = flag('--all') ? pool.length : Number(opt('--limit', 20));
   const rows = pool.slice(-lim);
   if (!rows.length) return console.log(flag('--dangerous') ? 'no dangerous commands recorded' : 'no snapshots yet');
   console.log(c('2', `${'ID'.padEnd(5)} ${'TURN'.padEnd(7)} ${'WHEN'.padEnd(8)} ${'AGENT'.padEnd(7)} ${'FILES'.padEnd(5)}  SNAPSHOT TAKEN`));
   for (const m of rows) {
     const t = m.step ? `t${m.turn}.${m.step}` : `t${m.turn}`;
-    const why = [...(m.reasons || []), ...(m.remoteDb && m.remoteDb.length ? [`remote DB ${m.remoteDb.join(', ')}: not undoable`] : [])];
+    const why = [...(m.reasons || []),
+      ...(m.remoteDb && m.remoteDb.length ? [`remote DB ${m.remoteDb.join(', ')}: not undoable`] : []),
+      ...(m.outsideDb ? ['outside/local DB: not undoable'] : [])];
     const danger = m.dangerous || why.length ? c('31', ` ⚠ dangerous${why.length ? ` (${why.join('; ')})` : ''}`) : '';
     const scope = m.outOfScope ? c('33', ' ⚠ out-of-scope') : '';
     console.log(`${String(m.id).padEnd(5)} ${t.padEnd(7)} ${ago(m.ts).padEnd(8)} ${String(m.agent || '-').padEnd(7)} ${String(m.changed == null ? '-' : m.changed).padEnd(5)}  ${m.dangerous ? c('1', label(m)) : label(m)}${danger}${scope}${m.receipt ? (m.receipt.status === 'green' ? c('32', ' ✓ tests passed') : c('31', ` ✗ tests ${m.receipt.status === 'blocked' ? 'failed (agent sent back)' : 'failed'}`)) : ''}${m.skipped && m.skipped.length ? c('33', ` (${m.skipped.length} big file(s) not saved)`) : ''}`);

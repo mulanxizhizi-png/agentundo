@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { Store } = require('./store');
 const { findProject } = require('./install');
-const { cannotUndo, analyze, remoteWarning, redact } = require('./danger');
+const { cannotUndo, unrestorableLocalDb, analyze, remoteWarning, redact } = require('./danger');
 const { pathsFromTool, checkScope, scopeWarning, normalizeAllowPaths } = require('./scope');
 
 const READ_ONLY = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'TodoWrite', 'TodoRead', 'Task', 'Agent', 'ExitPlanMode', 'BashOutput', 'KillShell', 'NotebookRead', 'ListMcpResourcesTool', 'ReadMcpResourceTool', 'view_image', 'update_plan', 'web_search']);
@@ -84,18 +84,30 @@ function handle(payload, agent, env = process.env) {
   const msgs = [];
   let a = { dangerous: false, reasons: [], remote: [] };
   try { if (label.command) a = analyze(label.command); } catch {}
+  const dbOpts = { cwd, maxFileMB: store.cfg.maxFileMB, excluded: (p) => store.defaultExcluded(p) };
+  const unrestorableDb = !!(label.command && unrestorableLocalDb(label.command, store.root, dbOpts));
+  if (unrestorableDb) label.outsideDb = true;
+  label.cwd = cwd;
   // Remote DB first: it is the one thing a local snapshot can never undo.
   if (a.remote.length) msgs.push(remoteWarning(a.remote));
   try {
     const r = store.snapshot(label);
     msgs.push(...r.warnings);
-    if (a.dangerous && r.snap) msgs.push(`agentundo: ⚠ ${a.reasons.join(', ')} — saved snapshot #${r.snap.id} first. Undo: agentundo restore ${r.snap.id}`);
+    if (a.dangerous && r.snap) {
+      // Outside / unrestorable local DB: list still shows the row, but never suggest `agentundo restore N`
+      // (project snapshot cannot restore that database).
+      if (unrestorableDb || r.snap.outsideDb) {
+        msgs.push(`agentundo: ⚠ ${a.reasons.join(', ')} — saved snapshot #${r.snap.id} first (local snapshot can't restore that database).`);
+      } else {
+        msgs.push(`agentundo: ⚠ ${a.reasons.join(', ')} — saved snapshot #${r.snap.id} first. Undo: agentundo restore ${r.snap.id}`);
+      }
+    }
     if (label.outOfScope) msgs.push(scopeWarning(label.outOfScopePaths, r.snap && r.snap.id, label.outOfScopeTotal));
   } catch (e) {
     store.logError(`${event}: ${e.message}`);
     msgs.push(`agentundo: snapshot FAILED, this step is not undoable (${e.message.slice(0, 200)}). Details: agentundo status`);
   }
-  if (label.command && !a.remote.length && cannotUndo(label.command, store.root, { cwd, maxFileMB: store.cfg.maxFileMB, excluded: (p) => store.defaultExcluded(p) })) msgs.push(`agentundo: heads-up, this command may change things outside the project (databases, remote, other folders); a local snapshot can't undo that.`);
+  if (label.command && !a.remote.length && cannotUndo(label.command, store.root, dbOpts)) msgs.push(`agentundo: heads-up, this command may change things outside the project (databases, remote, other folders); a local snapshot can't undo that.`);
   return msgs.length ? redact(msgs.join('\n')) : null;
 }
 

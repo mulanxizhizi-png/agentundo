@@ -94,6 +94,17 @@ const SQL_WRITE = /\b(insert\s+into|update\s+[\w"`.]+\s+set|delete\s+from|drop\s
 
 const MIGRATOR = /\b(prisma\s+(migrate|db\s+push)|alembic\s+(upgrade|downgrade)|rails\s+db:|rake\s+db:|knex\s+migrate|sequelize\s+db:|typeorm\s+(migration|schema)|drizzle-kit\s+(push|migrate)|flyway|liquibase|manage\.py\s+(migrate|flush))\b/;
 
+// ---- local, in-project SQLite files (snapshotted, so restore really undoes the write) ----
+// Main database files only; same extensions as DB_RE in store.js (sidecars -wal/-shm/-journal follow the main file).
+const SQLITE_FILE_RE = /\.(sqlite3?|db)$/i;
+const SQLITE_PROGS = new Set(['sqlite3', 'sqlite']);
+// sqlite3 options that take a value (sqlite3 accepts both -opt and --opt).
+const SQLITE_VALUE_OPTS = new Set(['-cmd', '-separator', '-newline', '-nullvalue', '-vfs', '-maxsize', '-mmap', '-lookaside', '-pagecache', '-heap', '-escape']);
+// SQL / dot-commands that can write somewhere other than the main database file, or run SQL/commands
+// we can't see: ATTACH, VACUUM INTO, .open/.backup/.save/.output/.once/.clone/.shell/.system/.excel/.read,
+// and sqlite3's -init/-A/-archive options.
+const SQLITE_ESCAPES = /\battach\b|\bvacuum\b[^;]*\binto\b|(?:^|[\s;"'(])\.(open|backup|save|output|once|clone|shell|system|excel|read)\b/i;
+
 // Analyse one command text. Returns { dangerous, reasons[], remote: [hosts], dbWrite }.
 function analyze(cmd, depth = 0) {
   const text = String(cmd || '');
@@ -153,6 +164,12 @@ function analyze(cmd, depth = 0) {
         else if (/^--host=/.test(args[i])) h = args[i].slice(7);
         else if (/^-h[^-]/.test(args[i]) && prog !== 'sqlite3') h = args[i].slice(2);
         if (h && !isLocalHost(h)) hosts.add(h);
+      }
+      // sqlite danger dot-commands (.shell/.backup/...): warn + dedicated snapshot, never block
+      if (SQLITE_PROGS.has(prog)) {
+        for (const m of String(text).matchAll(/(?:^|[\s;"'(])\.(shell|system|backup|save|clone|open|output|once|excel|read)\b/gi)) {
+          reasons.add(`sqlite .${m[1].toLowerCase()}`);
+        }
       }
     }
   }
@@ -268,16 +285,7 @@ function outsideProject(cmd, root) {
 }
 const OUTSIDE = [/\bgit\s+push\b/, /\b(aws|gcloud|az|kubectl|terraform)\s/, /\bcurl\b.*-X\s*(DELETE|POST|PUT)/, /\bdiskutil\b/];
 
-// ---- local, in-project SQLite files (snapshotted, so restore really undoes the write) ----
-// Main database files only; same extensions as DB_RE in store.js (sidecars -wal/-shm/-journal follow the main file).
-const SQLITE_FILE_RE = /\.(sqlite3?|db)$/i;
-const SQLITE_PROGS = new Set(['sqlite3', 'sqlite']);
-// sqlite3 options that take a value (sqlite3 accepts both -opt and --opt).
-const SQLITE_VALUE_OPTS = new Set(['-cmd', '-separator', '-newline', '-nullvalue', '-vfs', '-maxsize', '-mmap', '-lookaside', '-pagecache', '-heap', '-escape']);
-// SQL / dot-commands that can write somewhere other than the main database file, or run SQL/commands
-// we can't see: ATTACH, VACUUM INTO, .open/.backup/.save/.output/.once/.clone/.shell/.system/.excel/.read,
-// and sqlite3's -init/-A/-archive options.
-const SQLITE_ESCAPES = /\battach\b|\bvacuum\b[^;]*\binto\b|(?:^|[\s;"'(])\.(open|backup|save|output|once|clone|shell|system|excel|read)\b/i;
+
 
 // True only when we are sure every database the command writes is a local SQLite file inside the project
 // that the next snapshot captures (not in a default-excluded folder, not over maxFileMB). Anything we
@@ -371,12 +379,17 @@ function localSqliteOnly(cmd, opts = {}) {
   return walk(text, cwd0, 0) && sawSqlite;
 }
 
+// Local DB write that a project snapshot cannot restore (outside-project sqlite, non-sqlite clients,
+// over-cap / excluded / escaped sqlite). Remote hosts are handled separately via remoteWarning.
+function unrestorableLocalDb(cmd, root, opts = {}) {
+  const a = analyze(cmd);
+  return !!(a.dbWrite && !a.remote.length && !localSqliteOnly(cmd, { ...opts, root }));
+}
+
 // Generic heads-up (not the remote-DB warning): local DB writes, pushes, cloud CLIs, paths outside.
 // opts: { cwd, maxFileMB, excluded(relPath) } lets a write to an in-project SQLite file (which the snapshot
 // captures and restore undoes) skip the heads-up. Without opts the old, stricter behaviour applies.
 function cannotUndo(cmd, root, opts = {}) {
-  const a = analyze(cmd);
-  const localDb = a.dbWrite && !a.remote.length && !localSqliteOnly(cmd, { ...opts, root });
-  return localDb || OUTSIDE.some((re) => re.test(cmd)) || outsideProject(cmd, root);
+  return unrestorableLocalDb(cmd, root, opts) || OUTSIDE.some((re) => re.test(cmd)) || outsideProject(cmd, root);
 }
-module.exports = { touchesFiles, analyze, isDangerous, remoteDbHosts, remoteWarning, cannotUndo, localSqliteOnly, redact, dbUris, isLocalHost, lex, simpleCommands };
+module.exports = { touchesFiles, analyze, isDangerous, remoteDbHosts, remoteWarning, cannotUndo, unrestorableLocalDb, localSqliteOnly, redact, dbUris, isLocalHost, lex, simpleCommands };
