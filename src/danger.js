@@ -214,15 +214,57 @@ function isDangerous(cmd) { return analyze(cmd).dangerous; }
 function remoteDbHosts(cmd) { return analyze(cmd).remote; }
 function remoteWarning(hosts) { return `⚠ agentundo: this step touches a remote database (${hosts.map(redact).join(', ')}) — local snapshots cannot undo it.`; }
 
-// Absolute paths outside the project (and not system tool paths) => local snapshot can't help.
+// Paths a mutating command or a real write-redirect would change outside the project
+// (and not system tool paths) => local snapshot can't help.
+// Do not mix an unrelated home-path argument (e.g. `ls ~/.pgpass`) with a harmless
+// redirect like `2>/dev/null` / `>/dev/null` — that was a false-positive source.
+const OUTSIDE_MUTATORS = new Set(['rm', 'mv', 'cp', 'truncate', 'shred', 'dd', 'chmod', 'chown']);
+function isOutsidePath(p, root) {
+  if (!p) return false;
+  if (p.startsWith('~')) return true;
+  if (!p.startsWith('/')) return false;
+  if (/^\/(dev|tmp|proc|usr\/bin|bin)\b/.test(p)) return false;
+  return !(p === root || p.startsWith(root + '/'));
+}
+function mutatorTouchesOutside(words, root) {
+  if (!words.length) return false;
+  const { prog, args } = unwrap(words);
+  if (!prog || !OUTSIDE_MUTATORS.has(prog)) return false;
+  if (prog === 'dd') {
+    for (const a of args) {
+      const m = /^of=(.*)$/.exec(a);
+      if (m && isOutsidePath(m[1], root)) return true;
+    }
+    return false;
+  }
+  for (const a of args) {
+    if (a !== '-' && a.startsWith('-')) continue;
+    if (isOutsidePath(a, root)) return true;
+  }
+  return false;
+}
 function outsideProject(cmd, root) {
-  if (!/\b(rm|mv|cp|truncate|shred|dd|chmod|chown)\b|>/.test(cmd)) return false;
-  const paths = cmd.match(/(?:^|\s|=)(~\/[^\s;&|]*|\/[^\s;&|]+)/g) || [];
-  return paths.map((p) => p.trim().replace(/^=/, '')).some((p) => {
-    if (p.startsWith('~')) return true;
-    if (/^\/(dev|tmp|proc|usr\/bin|bin)\b/.test(p)) return false;
-    return !(p === root || p.startsWith(root + '/'));
-  });
+  let toks;
+  try { toks = lex(String(cmd || '')); } catch { return false; }
+  let words = [];
+  const flush = () => { const hit = mutatorTouchesOutside(words, root); words = []; return hit; };
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (t.op) { if (flush()) return true; continue; }
+    if (t.redir) {
+      // Drop a trailing bare fd number left by forms like `2>/dev/null`.
+      if (words.length && /^\d+$/.test(words[words.length - 1])) words.pop();
+      const target = (toks[i + 1] && toks[i + 1].w) || '';
+      if (toks[i + 1] && toks[i + 1].w) i++;
+      // Output redirects only; skip /dev/null and fd duplicates (>&1, &1).
+      if (t.redir.includes('>') && !t.redir.includes('<')
+          && target && target !== '/dev/null' && !/^&?\d+$/.test(target)
+          && isOutsidePath(target, root)) return true;
+      continue;
+    }
+    if (t.w) words.push(t.w);
+  }
+  return flush();
 }
 const OUTSIDE = [/\bgit\s+push\b/, /\b(aws|gcloud|az|kubectl|terraform)\s/, /\bcurl\b.*-X\s*(DELETE|POST|PUT)/, /\bdiskutil\b/];
 

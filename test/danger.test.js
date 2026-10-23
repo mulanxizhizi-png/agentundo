@@ -84,6 +84,22 @@ test('cannotUndo: generic heads-up still covers local DB writes and paths outsid
   assert.ok(!cannotUndo('psql -c "select 1"', '/p'));
 });
 
+test('cannotUndo: outsideProject ignores read-only ~/ paths and /dev/null redirects; still warns on real outside writes', () => {
+  // Acceptance: read-only + 2>/dev/null must not false-positive (was v0.1.4 bug).
+  assert.ok(!cannotUndo('ls ~/.pgpass; env | grep PG; command -v pip3 2>/dev/null', '/p'));
+  assert.ok(!cannotUndo('ls ~/.pgpass', '/p'));
+  assert.ok(!cannotUndo('ls ~/.pgpass >/dev/null', '/p'));
+  assert.ok(!cannotUndo('cat ~/.pgpass 2>/dev/null', '/p'));
+  // Real writes outside the project still warn.
+  assert.ok(cannotUndo('echo x > ~/out', '/p'));
+  assert.ok(cannotUndo('echo x >> ~/out', '/p'));
+  assert.ok(cannotUndo('cp a ~/elsewhere', '/p'));
+  assert.ok(cannotUndo('rm -rf ~/Documents', '/p'));
+  assert.ok(cannotUndo('dd if=/dev/zero of=~/disk.img bs=1 count=1', '/p'));
+  // In-project absolute path still quiet.
+  assert.ok(!cannotUndo('echo x > /p/out', '/p'));
+});
+
 function setup(files) { const env = freshEnv(); const d = tmpProject(files); assert.strictEqual(run(env, d, ['init']).code, 0); return { env, d }; }
 const ids = (out) => out.split('\n').filter((l) => /^\d+ /.test(l)).map((l) => Number(l.split(/\s+/)[0]));
 
