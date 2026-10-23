@@ -479,6 +479,21 @@ class Store {
     for (let i = 0; i + 1 < parts.length; i += 2) out.push({ status: parts[i][0], path: parts[i + 1] });
     return out;
   }
+
+  // Read-only: per-file added/deleted line counts between two trees ({ path: {add, del, binary} }).
+  // Used by `agentundo changes`. Binary files report `-` in git; here binary:true with add/del = 0.
+  numstat(fromTree, toTree) {
+    const parts = this.git(['diff-tree', '-r', '--no-renames', '--numstat', '-z', fromTree, toTree]).split('\0').filter((x) => x !== '');
+    const out = {};
+    for (const rec of parts) {
+      const i = rec.indexOf('\t'); const j = rec.indexOf('\t', i + 1);
+      if (i < 0 || j < 0) continue;
+      const a = rec.slice(0, i); const d = rec.slice(i + 1, j); const p = rec.slice(j + 1);
+      const binary = a === '-' || d === '-';
+      out[p] = { add: binary ? 0 : Number(a), del: binary ? 0 : Number(d), binary };
+    }
+    return out;
+  }
 }
 
 module.exports = { Store, homeDir, storeDir, storeDirFor, storesDir, allStoreDirs, storeInfo, relatedStoreDirs, realRoot, legacyRoot, migrateStore, sameDir, DEFAULTS, DEFAULT_EXCLUDES, MB };

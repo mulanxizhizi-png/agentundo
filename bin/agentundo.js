@@ -63,6 +63,7 @@ async function main() {
     case 'init': return init();
     case 'list': case 'ls': return list();
     case 'diff': return diff();
+    case 'changes': return changes();
     case 'restore': return doRestore();
     case 'status': return status();
     case 'snap': case 'snapshot': return snap();
@@ -80,6 +81,7 @@ function help() {
   agentundo init [--agent codex|claude] [--claude-scope local|user]
   agentundo list [--limit 20|--all] [--dangerous]   snapshots: id, turn, what it ran before (⚠ = dangerous / out-of-scope)
   agentundo diff <id> [--patch] [-- <paths>]   snapshot vs. working tree
+  agentundo changes [tN | <id>] [--batches] [--md] [--json]   what a turn (or everything since a snapshot) added/changed/deleted; read-only
   agentundo restore <id> [--dry-run] [--yes] [-- <paths>]
   agentundo snap [note]                  take a snapshot now
   agentundo status
@@ -149,6 +151,19 @@ function diff() {
   const out = s.git(['diff', '--no-renames', flag('--patch') ? '-p' : '--stat=120', m.tree, cur.tree, ...spec]);
   console.log(`snapshot #${m.id} (${label(m)}) -> working tree now`);
   process.stdout.write(out || 'no differences\n');
+}
+
+// Read-only: lists added/modified/deleted files (with line counts) for a turn or since a snapshot.
+// Never snapshots, never touches hooks or the user's .git; `--batches` only prints a suggested order.
+function changes() {
+  const C = require('../src/changes');
+  const s = storeOrDie();
+  let g;
+  try { g = C.gather(s, positional[0]); } catch (e) { die(e.message); }
+  const r = C.summarize(g.entries, g.stats, g.fromTops);
+  const o = { title: g.title, batches: flag('--batches') };
+  if (flag('--json')) return console.log(C.renderJson(r, { root: s.root, from: g.from.id, title: g.title }));
+  process.stdout.write(flag('--md') ? C.renderMarkdown(r, o) : C.renderText(r, o));
 }
 
 async function doRestore() {

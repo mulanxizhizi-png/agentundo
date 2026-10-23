@@ -40,6 +40,7 @@ This installs hooks for both agents (`--agent codex` or `--agent claude` for one
 ```
 agentundo list [--limit 20 | --all] [--dangerous]   snapshots: id, turn, the command it preceded, ⚠ + reason for dangerous ones
 agentundo diff <id> [--patch] [-- <paths>]   what changed between that snapshot and now
+agentundo changes [tN | <id>] [--batches] [--md] [--json]   what a turn added/modified/deleted, grouped; suggested review batches
 agentundo restore <id> [--dry-run] [--yes] [-- <paths>]
 agentundo snap [note] [--json]               take a snapshot by hand
 agentundo receipt --status <s> --json        used by agentreceipt (see below)
@@ -56,6 +57,24 @@ agentundo uninstall [--global] [--purge] [--yes]
 - Answering `n` at the prompt cancels the restore and exits with code 1.
 - restore lists what it will write and remove and asks first. Without a terminal it refuses unless you pass `--yes`.
 - Files are written to a temp folder and renamed into place one by one. If a restore is interrupted (Ctrl+C, crash), agentundo remembers it: re-run the same `restore` to finish, or restore the pre-restore snapshot to go back.
+
+## See what a turn changed (`agentundo changes`)
+
+The agent just touched dozens of files and you can't tell what happened? One command, no tokens:
+
+```
+agentundo changes            # the latest turn
+agentundo changes t3         # turn 3 (from its start to the start of turn 4, or to now)
+agentundo changes 12         # everything since snapshot #12, up to the current working tree
+agentundo changes t3 --batches   # suggested review order
+agentundo changes t3 --md        # Markdown checklist, pasteable into a PR description / commit message
+```
+
+It prints `N 个新增 · M 个修改 · K 个删除 · +X/−Y 行` (summary line is in Chinese), per-file line counts, and groups files as dependencies & lockfiles / config / source / tests / docs. Things that make people lose track are called out: new files, new top-level directories, new entry files (`server.js`, `main.py`…), dependency/lockfile and config changes, deletions. Binary files are listed without line counts.
+
+`--batches` suggests an order: config/deps → core source → tests → docs. Every changed file is in exactly one batch, so the batches always add up to all changed files.
+
+Boundaries: **read-only** (no new snapshot, nothing written to your `.git`, hooks untouched), **suggestion only** (it never commits, splits history or opens a PR), **never blocks** the agent, and **no network and no LLM**: grouping is by file path only. A turn that has no snapshot of its own is measured from the newest earlier snapshot.
 
 ## Dangerous-command alerts (v0.1.2)
 
