@@ -27,7 +27,7 @@ Claude Code's `/rewind` [does not track files changed by Bash commands](https://
 Requires Node 20+ and git. In your project folder:
 
 ```
-npx github:mulanxizhizi-png/agentundo#v0.1.5 init
+npx github:mulanxizhizi-png/agentundo#v0.1.6 init
 ```
 
 This installs hooks for both agents (`--agent codex` or `--agent claude` for one) and takes a baseline snapshot. After init you can also call `~/.agentundo/bin/agentundo` directly.
